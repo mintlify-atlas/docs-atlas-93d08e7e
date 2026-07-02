@@ -1,5 +1,5 @@
 ---
-title: "Defining Firestore Models with Pydantic"
+title: "Defining Firestore Models Using Pydantic BaseModel"
 sidebarTitle: "Models"
 description: "Learn how to define strongly-typed Firestore documents by subclassing BaseFirestoreModel, configuring collection settings, and declaring Pydantic fields."
 ---
@@ -37,7 +37,7 @@ class Post(BaseFirestoreModel):
 
 ## The Automatic `id` Field
 
-Every `BaseFirestoreModel` subclass automatically gains an `id` field defined as `Optional[str] = None`. It maps directly to the Firestore document ID.
+Every `BaseFirestoreModel` subclass automatically gains an `id` field defined as `Optional[str] = Field(default=None)`. It maps directly to the Firestore document ID.
 
 - When you call `save()` and `id` is `None`, Firestore auto-generates one and assigns it back to `self.id`.
 - When you supply an explicit `id` before saving, that value is used as the document ID — if a document with that ID already exists, `save()` raises a `RuntimeError`.
@@ -176,6 +176,14 @@ async def create_user_and_post():
 ## Pydantic v1 / v2 Compatibility
 
 Firestore Pydantic ODM is tested against both Pydantic v1 and v2. Internally it uses a compatibility shim (`pydantic_compat`) that normalises differences between the two versions — `model_dump()` vs `dict()`, `model_fields` vs `__fields__`, `ConfigDict` vs the inner `Config` class, and so on. Your model definitions do not need any version-specific code; write standard Pydantic models and the ODM handles the rest.
+
+Internally, the ODM sets the Pydantic model configuration as follows:
+
+- **Pydantic v2 ≥ 2.11** — `model_config = ConfigDict(validate_by_name=True, validate_by_alias=True)` (the config key names changed in v2.11).
+- **Pydantic v2 < 2.11** — `model_config = ConfigDict(populate_by_name=True)`.
+- **Pydantic v1** — an inner `Config` class with `allow_population_by_field_name = True` and `allow_population_by_alias = True`.
+
+This ensures that both field names and aliases are accepted when constructing model instances from Firestore document data, regardless of the Pydantic version installed.
 
 <CardGroup cols={2}>
   <Card title="Database Client" icon="database" href="/concepts/database-client">

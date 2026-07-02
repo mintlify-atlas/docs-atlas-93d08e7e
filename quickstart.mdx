@@ -244,7 +244,7 @@ async def main():
     # 7. find_one
     first = await User.find_one(
         filters=[],
-        order_by=(User.name, OrderByDirection.ASCENDING),
+        order_by=[(User.name, OrderByDirection.ASCENDING)],
     )
     print(f"First user alphabetically: {first.name}")
 

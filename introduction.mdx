@@ -41,6 +41,25 @@ The library auto-detects whether you are running Pydantic v1 or v2 at import tim
   </Card>
 </CardGroup>
 
+## Public API
+
+All public names are importable directly from the top-level `firestore_pydantic_odm` package:
+
+```python
+from firestore_pydantic_odm import (
+    BaseFirestoreModel,   # Base class for all Firestore document models
+    FirestoreField,       # Field descriptor for custom Firestore field names/options
+    FirestoreDB,          # Async Firestore client wrapper
+    BatchOperation,       # Enum for batch write operations (CREATE, UPDATE, DELETE)
+    FirestoreOperators,   # Enum of Firestore query operators (==, !=, <, >, etc.)
+    OrderByDirection,     # Enum for sort direction (ASCENDING, DESCENDING)
+    SubCollectionAccessor, # Fluent accessor returned by model.subcollection()
+    init_firestore_odm,   # Recommended initializer — wires DB into all models at once
+)
+```
+
+`init_firestore_odm(db, [ModelA, ModelB, ...])` is the recommended way to initialize the library. It injects the `FirestoreDB` instance into every model and registers the full model graph so cascade deletes can be resolved automatically. Calling `BaseFirestoreModel.initialize_db(db)` directly on a single model class is also supported as a per-model alternative.
+
 ## Requirements
 
 Before installing, make sure your environment meets the following minimum requirements:

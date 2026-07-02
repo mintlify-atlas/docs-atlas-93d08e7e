@@ -1,5 +1,5 @@
 ---
-title: "Subcollections and Parent-Child Relationships"
+title: "Firestore Subcollections and Parent-Child Relationships"
 sidebarTitle: "Subcollections"
 description: "Model nested Firestore subcollections with Settings.parent, query documents under a specific parent, and cascade-delete entire document hierarchies safely."
 ---
@@ -213,7 +213,7 @@ Collection group queries require a **composite index** in Firestore. If Firestor
 
 ## `_parent_path` Tracking
 
-The `_parent_path` private attribute records the full Firestore document path of the parent (e.g. `"users/abc123"`) on each subcollection instance. It is set automatically in three situations:
+The `_parent_path` private attribute records the full Firestore document path of the parent (e.g. `"users/abc123"`) on each subcollection instance. It is set automatically in four situations:
 
 - After `save(parent=...)` — the resolved parent path is stored on the instance.
 - After `find(parent=...)` or `find_one(parent=...)` — every yielded instance has `_parent_path` set.

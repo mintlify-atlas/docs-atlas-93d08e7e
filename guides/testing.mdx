@@ -9,10 +9,10 @@ Firestore Pydantic ODM is designed to be testable at two levels: **integration t
 ## Two Testing Strategies
 
 <CardGroup cols={2}>
-  <Card title="Emulator (Integration)" icon="server" href="/guides/testing">
+  <Card title="Emulator (Integration)" icon="server" href="/concepts/database-client">
     Runs all queries against a real Firestore protocol. Catches subtle query bugs, index requirements, and serialization edge cases.
   </Card>
-  <Card title="MagicMock (Unit)" icon="flask" href="/guides/testing">
+  <Card title="MagicMock (Unit)" icon="flask" href="/api/firestore-db">
     Replaces the client with a mock object. No network, no emulator, and instant test execution — ideal for testing business logic in isolation.
   </Card>
 </CardGroup>
@@ -208,31 +208,33 @@ async def test_get_nonexistent_returns_none(initialized_models):
 
 ## Docker Compose for CI
 
-For continuous integration pipelines, spin up the emulator as a service container. The repository ships with a `docker-compose.test.yml` that starts the emulator and runs the test suite:
+For continuous integration pipelines, spin up the emulator as a service container. The repository ships with a `docker-compose.test.yml` that starts the official Google Cloud SDK emulator image:
 
 ```yaml
-# docker-compose.test.yml (excerpt)
+# docker-compose.test.yml
 services:
   firestore-emulator:
-    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
-    command: gcloud emulators firestore start --host-port=0.0.0.0:8080
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    command: gcloud emulators firestore start --host-port=0.0.0.0:8080 --project=test-project
     ports:
       - "8080:8080"
-
-  tests:
-    build: .
-    environment:
-      FIRESTORE_EMULATOR_HOST: firestore-emulator:8080
-      GOOGLE_CLOUD_PROJECT: test-project
-    depends_on:
-      - firestore-emulator
-    command: pytest tests/
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 ```
 
-Run both services together with:
+Start the emulator container with:
 
 ```bash
-docker compose -f docker-compose.test.yml up --abort-on-container-exit
+docker compose -f docker-compose.test.yml up
+```
+
+Then run your tests against it by setting the environment variable:
+
+```bash
+FIRESTORE_EMULATOR_HOST=localhost:8080 pytest tests/
 ```
 
 ---

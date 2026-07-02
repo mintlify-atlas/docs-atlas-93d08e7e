@@ -355,7 +355,7 @@ async for post in Post.collection_group_find([Post.published == True]):
 
 ### `save`
 
-Persist a new document to Firestore. If `id` is `None`, Firestore generates a unique document ID and assigns it to the instance. Raises `RuntimeError` if an explicit `id` is provided but a document with that ID already exists.
+Persist a new document to Firestore. If `id` is `None`, Firestore generates a unique document ID and assigns it to the instance. Raises `RuntimeError` if the database has not been initialised, or if an explicit `id` is provided but a document with that ID already exists.
 
 ```python
 async def save(
@@ -395,7 +395,7 @@ print(user.id)  # auto-generated Firestore ID
 
 ### `update`
 
-Update fields on an **existing** Firestore document. The instance must have a non-`None` `id`. Only fields that pass the exclusion rules are sent to Firestore.
+Update fields on an **existing** Firestore document. The instance must have a non-`None` `id` — raises `ValueError` if `id` is not set. Only fields that pass the exclusion rules are sent to Firestore.
 
 ```python
 async def update(
@@ -440,7 +440,7 @@ await user.update(include={"email"})
 
 ### `delete`
 
-Delete the document from Firestore. The instance must have a non-`None` `id`.
+Delete the document from Firestore. The instance must have a non-`None` `id` — raises `ValueError` if `id` is not set.
 
 ```python
 async def delete(self, cascade: bool = False) -> None
@@ -504,4 +504,20 @@ def collection_name(self) -> str
 ```python
 user = User(username="alice", email="alice@example.com")
 print(user.collection_name)  # "users"
+```
+
+---
+
+### `get_collection_name`
+
+Class-level counterpart to the `collection_name` property. Returns the same value but can be called on the class itself without an instance — useful inside other classmethods and internal path resolution helpers.
+
+```python
+@classmethod
+def get_collection_name(cls) -> str
+```
+
+```python
+print(User.get_collection_name())   # "users"
+print(Post.get_collection_name())   # "posts"
 ```
