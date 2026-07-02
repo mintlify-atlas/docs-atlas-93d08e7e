@@ -1,0 +1,215 @@
+---
+title: "Configuring the Firestore Database Client"
+sidebarTitle: "Database Client"
+description: "Set up FirestoreDB for production, the local emulator, or unit tests, then register your models with init_firestore_odm to enable the full ODM feature set."
+---
+
+Before any model can read or write documents, the ODM needs a live connection to Firestore. The `FirestoreDB` class wraps Google Cloud's `AsyncClient` and provides a single, reusable configuration object that you create once at application start-up and pass to `init_firestore_odm()`.
+
+## FirestoreDB Overview
+
+`FirestoreDB` is a lightweight wrapper around `google.cloud.firestore_v1.AsyncClient`. Its responsibilities are:
+
+- Creating and holding a reference to the underlying async Firestore client.
+- Routing traffic to the **production Firestore** backend or a **local emulator**, depending on configuration.
+- Providing a `mock_firestore_for_tests()` helper that replaces the client with a `MagicMock` for unit tests.
+
+The `client` attribute exposes the raw `AsyncClient` if you ever need to drop down to the SDK directly.
+
+## Constructor Parameters
+
+```python
+from firestore_pydantic_odm import FirestoreDB
+
+db = FirestoreDB(
+    project_id="my-gcp-project",      # required
+    database="(default)",              # optional — Firestore database ID
+    credentials=None,                  # optional — explicit credentials object
+    emulator_host="localhost:8080",    # optional — route to local emulator
+)
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | `str` | ✅ | Your Google Cloud project identifier. |
+| `database` | `str \| None` | ❌ | Firestore database ID. Defaults to the project's default database. |
+| `credentials` | credentials object \| `None` | ❌ | Explicit GCP credentials. When `None`, the Google SDK default-credentials chain is used. |
+| `emulator_host` | `str \| None` | ❌ | Emulator host and port (e.g. `"localhost:8080"`). When set, all traffic is directed to the emulator. |
+
+## Production Setup
+
+In production, `FirestoreDB` relies on Google's [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials). No explicit `credentials` argument is needed when your environment is properly authenticated.
+
+<Tabs>
+  <Tab title="Cloud Run / GKE (workload identity)">
+    When running on Google Cloud infrastructure with a service account attached, ADC picks up the credentials automatically — no environment variables required.
+
+    ```python
+    from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+    from myapp.models import User, Post
+
+    db = FirestoreDB(project_id="my-gcp-project")
+    init_firestore_odm(db, [User, Post])
+    ```
+  </Tab>
+  <Tab title="Local / CI with service account key">
+    Export `GOOGLE_APPLICATION_CREDENTIALS` pointing to your service-account JSON file before starting your application.
+
+    ```bash
+    export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+    ```
+
+    ```python
+    from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+    from myapp.models import User, Post
+
+    # Credentials are picked up automatically from the environment
+    db = FirestoreDB(project_id="my-gcp-project")
+    init_firestore_odm(db, [User, Post])
+    ```
+  </Tab>
+  <Tab title="Explicit credentials object">
+    Pass a credentials object directly when you need finer control — for example when rotating keys programmatically.
+
+    ```python
+    from google.oauth2 import service_account
+    from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+    from myapp.models import User, Post
+
+    creds = service_account.Credentials.from_service_account_file(
+        "/path/to/service-account.json"
+    )
+
+    db = FirestoreDB(project_id="my-gcp-project", credentials=creds)
+    init_firestore_odm(db, [User, Post])
+    ```
+  </Tab>
+</Tabs>
+
+## Emulator Setup
+
+The Firestore emulator lets you develop and run integration tests without touching a real Firestore instance. The ODM sets the `FIRESTORE_EMULATOR_HOST` environment variable internally when you configure an emulator host, so you never have to set it yourself.
+
+<Steps>
+  <Step title="Start the emulator">
+    ```bash
+    gcloud emulators firestore start --host-port=localhost:8080
+    ```
+  </Step>
+  <Step title="Pass emulator_host to FirestoreDB">
+    ```python
+    from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+    from myapp.models import User, Post
+
+    db = FirestoreDB(
+        project_id="my-gcp-project",
+        emulator_host="localhost:8080",
+    )
+    init_firestore_odm(db, [User, Post])
+    ```
+  </Step>
+</Steps>
+
+### Switching Between Emulator and Production at Runtime
+
+If you need to toggle between the emulator and production on a running `FirestoreDB` instance — for example inside a test fixture — use `use_emulator()` and `clear_emulator()`.
+
+```python
+db = FirestoreDB(project_id="my-gcp-project")
+
+# Redirect to the local emulator and recreate the AsyncClient
+db.use_emulator(host="localhost:8080")
+
+# Run tests against the emulator …
+
+# Switch back to production Firestore
+db.clear_emulator()
+```
+
+<Note>
+Both `use_emulator()` and `clear_emulator()` recreate the underlying `AsyncClient` immediately. Any in-flight requests on the old client will not be affected, but all subsequent calls will use the new client.
+</Note>
+
+## Mock Firestore for Unit Tests
+
+For unit tests that must not touch the network or the emulator, `mock_firestore_for_tests()` replaces `db.client` with a `unittest.mock.MagicMock`. This keeps your test suite fast and hermetic.
+
+```python
+import pytest
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+from myapp.models import User
+
+@pytest.fixture
+def mock_db():
+    db = FirestoreDB(project_id="test-project")
+    db.mock_firestore_for_tests()
+    init_firestore_odm(db, [User])
+    return db
+
+async def test_something(mock_db):
+    # All Firestore calls go to the MagicMock — no network traffic
+    user = User(name="Test", email="test@example.com")
+    # ... assert on mock_db.client.collection.call_args, etc.
+```
+
+<Tip>
+For integration tests that need real Firestore behaviour (transactions, ordering, subcollections), prefer the emulator over the mock. Reserve `mock_firestore_for_tests()` for pure unit tests that only care about the ODM's internal logic.
+</Tip>
+
+## Registering Models
+
+Registering models with `init_firestore_odm()` does three things for each model in the list:
+
+1. **Injects `_db`** — calls `model.initialize_db(database)` so every class method has access to the Firestore client.
+2. **Sets up field descriptors** — calls `model.initialize_fields()` so that class-level attribute access (e.g. `User.age >= 18`) produces query filter tuples.
+3. **Populates `_registered_models`** — stores the full list of model classes on `BaseFirestoreModel._registered_models`, which is consulted during cascade deletes to discover child models dynamically.
+
+```python
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+from myapp.models import User, Post, Comment, Product
+
+db = FirestoreDB(project_id="my-gcp-project")
+
+# Register every model your application uses
+init_firestore_odm(db, [User, Post, Comment, Product])
+```
+
+### Per-Model Initialisation
+
+When `init_firestore_odm()` is not suitable — for example in a plugin architecture where models are discovered at runtime — you can initialise each model individually.
+
+```python
+db = FirestoreDB(project_id="my-gcp-project")
+
+User.initialize_db(db)
+User.initialize_fields()
+
+Post.initialize_db(db)
+Post.initialize_fields()
+```
+
+<Warning>
+Per-model initialisation does **not** populate `BaseFirestoreModel._registered_models`. Without the registry, `delete(cascade=True)` cannot discover child models and will only delete the target document. Pass all models to `init_firestore_odm()` whenever you use cascade deletes.
+</Warning>
+
+## Why Registration Matters for Cascade Delete
+
+When you call `document.delete(cascade=True)`, the ODM calls `cls._get_child_models()` to find every registered model whose `Settings.parent` points to the current class. It then recurses through all matching documents and deletes them before deleting the parent. This traversal only works if all models were registered via `init_firestore_odm()`.
+
+```python
+# Both User and Post must be registered for cascade to work
+init_firestore_odm(db, [User, Post, Comment])
+
+user = await User.get("uid_123")
+await user.delete(cascade=True)
+# Deletes: users/uid_123/posts/* and their comments, then users/uid_123
+```
+
+<CardGroup cols={2}>
+  <Card title="Models" icon="file-code" href="/concepts/models">
+    Learn how to declare Firestore document schemas with Pydantic.
+  </Card>
+  <Card title="Subcollections" icon="sitemap" href="/concepts/subcollections">
+    Model parent-child document relationships and run nested queries.
+  </Card>
+</CardGroup>

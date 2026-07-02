@@ -1,0 +1,210 @@
+---
+title: "FirestoreField: Typed Query Filter Descriptor"
+sidebarTitle: "FirestoreField"
+description: "API reference for FirestoreField, the Python descriptor that enables type-safe, expressive Firestore query filters directly on model class attributes."
+---
+
+`FirestoreField` is a Python descriptor that sits on each attribute of a `BaseFirestoreModel` subclass and makes building Firestore query filters feel like ordinary Python comparisons. Instead of writing raw string tuples by hand, you write `User.age >= 18` and get back the exact `(field_name, operator, value)` tuple that `find()` and `find_one()` expect — with no string literals that can drift out of sync with your schema.
+
+## How it works
+
+`FirestoreField` implements the [descriptor protocol](https://docs.python.org/3/howto/descriptor.html) via `__get__`. The behavior differs depending on whether the attribute is accessed on the **class** or on an **instance**:
+
+| Access point | Returns |
+|---|---|
+| `User.age` (class-level) | The `FirestoreField` descriptor — enables comparison operators for filter building |
+| `user.age` (instance-level) | The actual field value stored on that instance |
+
+This dual behaviour means the same attribute name serves both purposes without any naming collisions or wrapper types leaking into your application code.
+
+## Automatic initialization
+
+You never instantiate `FirestoreField` yourself. When you call `init_firestore_odm()`, it iterates over every model class you registered and calls `model.initialize_fields()` on each one. That classmethod walks the Pydantic field definitions and calls `setattr(cls, field_name, FirestoreField(alias))` for every field, replacing the default Pydantic descriptor with a `FirestoreField` descriptor transparently.
+
+```python
+from firestore_pydantic_odm import init_firestore_odm, BaseFirestoreModel
+from google.cloud import firestore
+
+class User(BaseFirestoreModel):
+    name: str
+    age: int
+
+    class Settings:
+        name = "users"
+
+db = firestore.AsyncClient()
+init_firestore_odm(database=db, document_models=[User])
+
+# After init, User.name and User.age are FirestoreField descriptors
+print(type(User.age))   # <class 'FirestoreField'>
+print(User.age)         # 'age'  (str representation = field name)
+```
+
+<Note>
+The `id` field is special: `initialize_fields()` maps it to `FieldPath.document_id()` rather than the literal string `"id"`. This ensures equality filters on `id` are routed through Firestore's document-ID path, which is required for correct query behaviour on document IDs.
+</Note>
+
+---
+
+## String representation
+
+Calling `str()` or `repr()` on a `FirestoreField` returns the **field name** (or alias) as a plain string. This lets you pass a descriptor directly to any Firestore API that expects a field path string — for instance in `order_by` — without any manual coercion.
+
+```python
+print(str(User.name))   # 'name'
+print(repr(User.age))   # 'age'
+```
+
+---
+
+## Comparison operators
+
+Each standard Python comparison operator is overridden to return a `(field_name, FirestoreOperators, value)` filter tuple instead of a boolean. Pass these tuples — or a list of them — to the `filters` parameter of `find()`, `find_one()`, or `count()`.
+
+| Operator | Generated tuple |
+|---|---|
+| `User.age == 30` | `('age', FirestoreOperators.EQ, 30)` |
+| `User.age != 30` | `('age', FirestoreOperators.NE, 30)` |
+| `User.age < 30` | `('age', FirestoreOperators.LT, 30)` |
+| `User.age <= 30` | `('age', FirestoreOperators.LTE, 30)` |
+| `User.age > 30` | `('age', FirestoreOperators.GT, 30)` |
+| `User.age >= 30` | `('age', FirestoreOperators.GTE, 30)` |
+
+<CodeGroup>
+
+```python Equality and inequality
+async for user in User.find(filters=[User.status == "active"]):
+    print(user.name)
+
+async for user in User.find(filters=[User.role != "banned"]):
+    print(user.name)
+```
+
+```python Range filters
+async for user in User.find(filters=[
+    User.age >= 18,
+    User.age < 65,
+]):
+    print(user.name, user.age)
+```
+
+```python Multiple combined filters
+async for post in Post.find(filters=[
+    Post.published == True,
+    Post.score > 100,
+    Post.author != "anonymous",
+]):
+    print(post.title, post.score)
+```
+
+</CodeGroup>
+
+<Warning>
+Firestore does not allow range filters (`<`, `<=`, `>`, `>=`, `!=`) on more than one field in the same query. If you need to filter by range on two different fields, consider restructuring your data or splitting the query and filtering the remainder in Python.
+</Warning>
+
+---
+
+## Helper methods
+
+Four additional methods cover Firestore operators that have no direct Python operator equivalent.
+
+### `in_(values)`
+
+Returns `(field_name, FirestoreOperators.IN, values)`.
+
+Matches documents where the field value is one of the items in `values`. The list may contain at most 30 elements (Firestore limit).
+
+```python
+async for user in User.find(filters=[
+    User.role.in_(["admin", "moderator", "editor"]),
+]):
+    print(user.name, user.role)
+```
+
+### `not_in_(values)`
+
+Returns `(field_name, FirestoreOperators.NOT_IN, values)`.
+
+Matches documents where the field value is **not** in `values` and the field exists. The list may contain at most 10 elements (Firestore limit).
+
+```python
+async for user in User.find(filters=[
+    User.status.not_in_(["banned", "suspended"]),
+]):
+    print(user.name)
+```
+
+### `array_contains(value)`
+
+Returns `(field_name, FirestoreOperators.ARRAY_CONTAINS, value)`.
+
+Matches documents where an array field contains the given single value.
+
+```python
+async for post in Post.find(filters=[
+    Post.tags.array_contains("python"),
+]):
+    print(post.title)
+```
+
+### `array_contains_any(values)`
+
+Returns `(field_name, FirestoreOperators.ARRAY_CONTAINS_ANY, values)`.
+
+Matches documents where an array field contains **at least one** of the values in the list. The list may contain at most 30 elements (Firestore limit).
+
+```python
+async for post in Post.find(filters=[
+    Post.tags.array_contains_any(["python", "firestore", "pydantic"]),
+]):
+    print(post.title)
+```
+
+<Tip>
+You can combine `array_contains` with equality or range filters on other fields in the same query. You cannot, however, combine `array_contains` with `array_contains_any`, or use more than one `IN` / `NOT_IN` / `array_contains_any` clause in a single query — these are Firestore SDK restrictions, not ODM restrictions.
+</Tip>
+
+---
+
+## Complete example
+
+The snippet below shows a realistic query that combines several filter types, ordering, and pagination — all using `FirestoreField` descriptors.
+
+```python
+from firestore_pydantic_odm import (
+    BaseFirestoreModel,
+    OrderByDirection,
+    init_firestore_odm,
+)
+from google.cloud import firestore
+from typing import List, Optional
+
+class Article(BaseFirestoreModel):
+    title: str
+    author: str
+    score: int
+    tags: List[str]
+    published: bool
+
+    class Settings:
+        name = "articles"
+
+db = firestore.AsyncClient()
+init_firestore_odm(database=db, document_models=[Article])
+
+# Build filters using FirestoreField descriptors
+filters = [
+    Article.published == True,
+    Article.score >= 50,
+    Article.tags.array_contains("python"),
+    Article.author.not_in_(["spam-bot", "deleted-user"]),
+]
+
+async for article in Article.find(
+    filters=filters,
+    order_by=(Article.score, OrderByDirection.DESCENDING),
+    limit=20,
+):
+    print(article.title, article.score)
+```

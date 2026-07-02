@@ -1,0 +1,201 @@
+---
+title: "FirestoreDB — Firestore AsyncClient Wrapper"
+sidebarTitle: "FirestoreDB"
+description: "Thin wrapper around google-cloud-firestore AsyncClient supporting production, local emulator, and MagicMock configurations for testing."
+---
+
+`FirestoreDB` is a lightweight wrapper around the `google.cloud.firestore_v1.AsyncClient` that provides a single, consistent way to configure your Firestore connection — whether you are targeting the production service, a local emulator during development, or a `MagicMock` in unit tests. Once constructed, pass it to `init_firestore_odm` to wire up all your document models.
+
+## Constructor
+
+```python
+class FirestoreDB:
+    def __init__(
+        self,
+        project_id: str,
+        database: Optional[str] = None,
+        credentials=None,
+        emulator_host: Optional[str] = None,
+    )
+```
+
+<ParamField path="project_id" type="str" required>
+  Your Google Cloud project identifier (for example `"my-gcp-project"`). This is passed directly to the underlying `AsyncClient`.
+</ParamField>
+
+<ParamField path="database" type="str | None">
+  The Firestore **database ID** to connect to. Omit (or pass `None`) to use the default database `"(default)"`.
+</ParamField>
+
+<ParamField path="credentials" type="google.auth.credentials.Credentials | None">
+  Explicit Google Auth credentials object. When `None` the Google SDK's [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) chain is used automatically.
+</ParamField>
+
+<ParamField path="emulator_host" type="str | None">
+  Host and port of a running **Firestore emulator** such as `"localhost:8080"`. When provided, the constructor sets the `FIRESTORE_EMULATOR_HOST` environment variable and points the `AsyncClient` to the emulator instead of the production service.
+</ParamField>
+
+## The `client` attribute
+
+After construction, `FirestoreDB.client` holds the live `AsyncClient` instance. You can access it directly if you need to run raw Firestore operations outside the ODM.
+
+```python
+raw_ref = db.client.collection("raw_collection").document("doc_id")
+snap = await raw_ref.get()
+```
+
+<Note>
+  The `client` attribute is replaced in-place by `use_emulator`, `clear_emulator`, and `mock_firestore_for_tests`. Any models that already have a reference to `db` will automatically use the new client because `BaseFirestoreModel` reads `db.client` at call time, not at injection time.
+</Note>
+
+---
+
+## Methods
+
+### `use_emulator`
+
+Switch the instance to a local Firestore emulator and recreate the `AsyncClient`. Sets the `FIRESTORE_EMULATOR_HOST` environment variable so that the Google client libraries route all traffic to the emulator.
+
+```python
+def use_emulator(self, host: str = "localhost:8080") -> None
+```
+
+<ParamField path="host" type="str" default='"localhost:8080"'>
+  The hostname and port where the Firestore emulator is listening. Uses `"localhost:8080"` by default, which matches the default port used by `firebase emulators:start`.
+</ParamField>
+
+```python
+db = FirestoreDB(project_id="my-project")
+db.use_emulator()          # connect to localhost:8080
+db.use_emulator("0.0.0.0:9090")  # connect to a custom host/port
+```
+
+---
+
+### `clear_emulator`
+
+Disable the emulator and reconnect to the **production** Firestore service. Removes the `FIRESTORE_EMULATOR_HOST` environment variable and recreates the `AsyncClient` pointing at the real backend.
+
+```python
+def clear_emulator(self) -> None
+```
+
+```python
+db.use_emulator()       # switch to emulator
+# ... run some tests ...
+db.clear_emulator()     # switch back to production
+```
+
+---
+
+### `mock_firestore_for_tests`
+
+Replace `client` with a `unittest.mock.MagicMock`. This is the fastest way to isolate unit tests from Firestore without running the emulator or touching the network.
+
+```python
+def mock_firestore_for_tests(self) -> None
+```
+
+<Note>
+  After calling this method, all calls to `db.client` return the mock. You can configure return values on the mock using standard `unittest.mock` APIs. No network calls are made.
+</Note>
+
+```python
+db.mock_firestore_for_tests()
+db.client.collection.return_value.document.return_value.get = AsyncMock(
+    return_value=mock_snapshot
+)
+```
+
+---
+
+## The `init_firestore_odm` function
+
+`init_firestore_odm` is a standalone module-level function exported from `firestore_pydantic_odm`. It wires up one or more document model classes to a `FirestoreDB` instance in a single call, replacing the need to call `initialize_db` and `initialize_fields` on each class individually. It also populates the internal model registry used for cascade deletions.
+
+```python
+def init_firestore_odm(
+    database: FirestoreDB,
+    document_models: List[Type[BaseFirestoreModel]],
+) -> None
+```
+
+<ParamField path="database" type="FirestoreDB" required>
+  The `FirestoreDB` instance to inject into every model class listed in `document_models`.
+</ParamField>
+
+<ParamField path="document_models" type="List[Type[BaseFirestoreModel]]" required>
+  All model classes that should be registered with the ODM. Include every top-level collection model **and** every subcollection model — the order does not matter. The registry built from this list is used when performing cascade deletes.
+</ParamField>
+
+---
+
+## Code examples
+
+<CodeGroup>
+
+```python Production setup
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm, BaseFirestoreModel
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+    username: str
+    email: str
+
+# Uses Application Default Credentials automatically
+db = FirestoreDB(project_id="my-gcp-project")
+init_firestore_odm(database=db, document_models=[User])
+
+# Optional: target a named database (non-default)
+db_named = FirestoreDB(
+    project_id="my-gcp-project",
+    database="my-secondary-db",
+)
+```
+
+```python Emulator setup
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+
+# Connect directly via the constructor
+db = FirestoreDB(
+    project_id="demo-project",
+    emulator_host="localhost:8080",
+)
+init_firestore_odm(database=db, document_models=[User])
+
+# Or toggle at runtime
+db = FirestoreDB(project_id="demo-project")
+db.use_emulator()  # defaults to localhost:8080
+```
+
+```python Unit test mock
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+
+@pytest.fixture
+def mock_db():
+    db = FirestoreDB(project_id="test-project")
+    db.mock_firestore_for_tests()
+    init_firestore_odm(database=db, document_models=[User])
+    return db
+
+async def test_user_creation(mock_db):
+    # Configure mock return values
+    doc_ref_mock = MagicMock()
+    doc_ref_mock.id = "test-uid-123"
+    doc_ref_mock.set = AsyncMock()
+
+    snap_mock = MagicMock()
+    snap_mock.exists = False
+    doc_ref_mock.get = AsyncMock(return_value=snap_mock)
+
+    mock_db.client.collection.return_value.document.return_value = doc_ref_mock
+
+    user = User(username="alice", email="alice@example.com")
+    await user.save()
+    assert user.id is not None
+```
+
+</CodeGroup>

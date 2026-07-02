@@ -1,0 +1,169 @@
+---
+title: "Enums: BatchOperation, FirestoreOperators, OrderByDirection"
+sidebarTitle: "Enums"
+description: "Reference for the three enum classes used to express batch operations, query filter operators, and result ordering direction in Firestore Pydantic ODM."
+---
+
+Firestore Pydantic ODM ships three `str`-based enums that act as the vocabulary for batch writes, query filters, and result ordering. Because every member inherits from `str`, enum values can be passed directly wherever Firestore's Python client expects a plain string — no extra conversion step needed.
+
+## BatchOperation
+
+`BatchOperation` identifies the kind of atomic write to perform when you pass a list of operations to `batch_write()`. Each operation is expressed as a two-element tuple: `(BatchOperation, model_instance)`.
+
+| Member | Value |
+|--------|-------|
+| `CREATE` | `"create"` |
+| `UPDATE` | `"update"` |
+| `DELETE` | `"delete"` |
+
+<CodeGroup>
+
+```python Batch create and delete
+from firestore_pydantic_odm import BatchOperation, FirestoreOperators, OrderByDirection
+
+alice = User(name="Alice", age=30)
+bob   = User(id="bob-id", name="Bob", age=25)
+
+await User.batch_write([
+    (BatchOperation.CREATE, alice),   # new document — id auto-assigned
+    (BatchOperation.DELETE, bob),     # remove an existing document
+])
+```
+
+```python Batch update
+from firestore_pydantic_odm import BatchOperation, FirestoreOperators, OrderByDirection
+
+# Fetch and mutate two existing users, then write both atomically
+alice = await User.get("alice-id")
+bob   = await User.get("bob-id")
+
+alice.age = 31
+bob.age   = 26
+
+await User.batch_write([
+    (BatchOperation.UPDATE, alice),
+    (BatchOperation.UPDATE, bob),
+])
+```
+
+</CodeGroup>
+
+<Note>
+When using `BatchOperation.CREATE`, the `id` field on the model instance may be `None`. The batch writer will auto-assign a Firestore document ID and write it back to `model_instance.id` before committing. For `UPDATE` and `DELETE`, `id` must already be set.
+</Note>
+
+---
+
+## FirestoreOperators
+
+`FirestoreOperators` enumerates every comparison and membership operator supported by Firestore queries. You typically encounter these indirectly — the `FirestoreField` descriptor produces them automatically when you use Python's built-in comparison syntax. However, you can also reference them directly when constructing raw filter tuples.
+
+| Member | Value | Meaning |
+|--------|-------|---------|
+| `LT` | `"<"` | Less than |
+| `LTE` | `"<="` | Less than or equal |
+| `EQ` | `"=="` | Equal |
+| `NE` | `"!="` | Not equal |
+| `GT` | `">"` | Greater than |
+| `GTE` | `">="` | Greater than or equal |
+| `IN` | `"in"` | Value is in list |
+| `NOT_IN` | `"not-in"` | Value is not in list |
+| `ARRAY_CONTAINS` | `"array_contains"` | Array field contains value |
+| `ARRAY_CONTAINS_ANY` | `"array_contains_any"` | Array field contains any of the listed values |
+
+<Tabs>
+
+<Tab title="Indirect usage (recommended)">
+
+```python
+from firestore_pydantic_odm import BatchOperation, FirestoreOperators, OrderByDirection
+
+# FirestoreField descriptors generate the tuples for you
+async for user in User.find(filters=[
+    User.age >= 18,           # ('age', FirestoreOperators.GTE, 18)
+    User.status == "active",  # ('status', FirestoreOperators.EQ, 'active')
+]):
+    print(user.name)
+```
+
+</Tab>
+
+<Tab title="Direct usage">
+
+```python
+from firestore_pydantic_odm import BatchOperation, FirestoreOperators, OrderByDirection
+
+# Build filter tuples manually using the enum members
+filters = [
+    ("age",    FirestoreOperators.GTE, 18),
+    ("status", FirestoreOperators.EQ,  "active"),
+    ("role",   FirestoreOperators.IN,  ["admin", "moderator"]),
+]
+
+async for user in User.find(filters=filters):
+    print(user.name)
+```
+
+</Tab>
+
+</Tabs>
+
+<Tip>
+Prefer the `FirestoreField` comparison syntax (`User.age >= 18`) over raw tuples. It is less error-prone and keeps your query logic coupled to the model definition, so a renamed field is caught at development time rather than at runtime.
+</Tip>
+
+---
+
+## OrderByDirection
+
+`OrderByDirection` specifies whether results should be returned in ascending or descending order when an `order_by` parameter is supplied to `find()`, `find_one()`, or their collection-group equivalents.
+
+| Member | Value |
+|--------|-------|
+| `ASCENDING` | `"ASCENDING"` |
+| `DESCENDING` | `"DESCENDING"` |
+
+`OrderByDirection` overrides `__str__` to return the raw value, so it integrates cleanly with the Firestore Python client's `direction` keyword argument without any manual coercion.
+
+<CodeGroup>
+
+```python Single field ordering
+from firestore_pydantic_odm import BatchOperation, FirestoreOperators, OrderByDirection
+
+# Newest users first
+async for user in User.find(
+    order_by=(User.created_at, OrderByDirection.DESCENDING),
+):
+    print(user.name, user.created_at)
+```
+
+```python Multiple field ordering
+from firestore_pydantic_odm import BatchOperation, FirestoreOperators, OrderByDirection
+
+# Sort by creation date descending, then name ascending
+async for user in User.find(
+    order_by=[
+        (User.created_at, OrderByDirection.DESCENDING),
+        User.name,  # direction omitted → Firestore default (ASCENDING)
+    ],
+):
+    print(user.name, user.created_at)
+```
+
+```python Combined with filters and pagination
+from firestore_pydantic_odm import BatchOperation, FirestoreOperators, OrderByDirection
+
+async for post in Post.find(
+    filters=[Post.published == True],
+    order_by=(Post.created_at, OrderByDirection.DESCENDING),
+    limit=10,
+    offset=0,
+):
+    print(post.title)
+```
+
+</CodeGroup>
+
+<Note>
+When an `order_by` entry is a bare field rather than a tuple — for example, just `User.name` — Firestore applies its default ascending order. Wrap the field in a tuple with `OrderByDirection.ASCENDING` if you want to be explicit.
+</Note>

@@ -1,0 +1,108 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Firestore Pydantic ODM",
+  "projectDescription": "An asynchronous, fully-typed Object-Document Mapper for Google Cloud Firestore that combines Pydantic validation with async CRUD, batch writes, subcollections, projections, and transactions.",
+  "theme": "luma",
+  "primaryColor": "#40993e",
+  "lightColor": "#183018",
+  "darkColor": "#e4e8e4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/models",
+              "concepts/database-client",
+              "concepts/subcollections"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/querying",
+              "guides/batch-operations",
+              "guides/projections",
+              "guides/testing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Classes",
+            "pages": [
+              "api/base-firestore-model",
+              "api/firestore-db",
+              "api/subcollection-accessor"
+            ]
+          },
+          {
+            "group": "Enums & Fields",
+            "pages": [
+              "api/enums",
+              "api/firestore-field"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Async CRUD operations (save, update, delete, get) using Python async/await",
+    "Pydantic v1 and v2 compatibility for model definition and data validation",
+    "Subcollections with Settings.parent and cascade delete support",
+    "Field projections that generate Firestore field masks for efficient queries",
+    "Batch writes (create, update, delete) executed atomically",
+    "Collection group queries across all subcollection instances",
+    "Firestore emulator support for local development and CI testing",
+    "Typed query filters using Python comparison operators on FirestoreField descriptors",
+    "OrderBy and pagination (limit/offset) support on queries"
+  ],
+  "publicApiSurface": [
+    "BaseFirestoreModel",
+    "BaseFirestoreModel.save(parent, exclude_none, by_alias, exclude_unset)",
+    "BaseFirestoreModel.update(parent, include, exclude_none, by_alias, exclude_unset)",
+    "BaseFirestoreModel.delete(cascade)",
+    "BaseFirestoreModel.get(doc_id, parent)",
+    "BaseFirestoreModel.exists(doc_id, parent)",
+    "BaseFirestoreModel.find(filters, parent, projection, order_by, limit, offset)",
+    "BaseFirestoreModel.find_one(filters, parent, projection, order_by)",
+    "BaseFirestoreModel.count(filters, parent)",
+    "BaseFirestoreModel.batch_write(operations)",
+    "BaseFirestoreModel.collection_group_find(filters, projection, order_by, limit, offset)",
+    "BaseFirestoreModel.initialize_db(db)",
+    "BaseFirestoreModel.subcollection(child_cls)",
+    "FirestoreDB(project_id, database, credentials, emulator_host)",
+    "FirestoreDB.use_emulator(host)",
+    "FirestoreDB.clear_emulator()",
+    "FirestoreDB.mock_firestore_for_tests()",
+    "SubCollectionAccessor.add(doc)",
+    "SubCollectionAccessor.get(doc_id)",
+    "SubCollectionAccessor.find(filters)",
+    "SubCollectionAccessor.find_one(filters)",
+    "SubCollectionAccessor.count(filters)",
+    "SubCollectionAccessor.exists(doc_id)",
+    "SubCollectionAccessor.delete(doc)",
+    "init_firestore_odm(database, document_models)",
+    "BatchOperation.CREATE",
+    "BatchOperation.UPDATE",
+    "BatchOperation.DELETE",
+    "FirestoreOperators (EQ, NE, LT, LTE, GT, GTE, IN, NOT_IN, ARRAY_CONTAINS, ARRAY_CONTAINS_ANY)",
+    "OrderByDirection.ASCENDING",
+    "OrderByDirection.DESCENDING",
+    "FirestoreField (descriptor with comparison operator support)"
+  ]
+}

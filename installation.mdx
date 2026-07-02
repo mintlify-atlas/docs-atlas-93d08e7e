@@ -1,0 +1,182 @@
+---
+title: "Installing Firestore Pydantic ODM in Python"
+sidebarTitle: "Installation"
+description: "Step-by-step instructions for installing Firestore Pydantic ODM, configuring Google Cloud credentials, and verifying your setup works correctly."
+---
+
+Firestore Pydantic ODM is distributed as a pure-Python package on PyPI and has no compiled extensions, making installation straightforward on any platform that runs Python 3.8 or later. This page covers the base install, the optional emulator extra, credential configuration for every environment, Pydantic version compatibility, and a quick verification snippet.
+
+## Install via pip
+
+pip is the only supported package manager. Install the latest stable release with:
+
+```bash
+pip install firestore-pydantic-odm
+```
+
+### Optional extras
+
+| Extra | Installs | When to use |
+|---|---|---|
+| `emulator` | `google-cloud-firestore-emulator` | Local development and CI against the Firestore emulator |
+| `dev` | `black`, `ruff`, `pytest`, `pytest-asyncio`, `httpx` | Contributing to the library itself |
+
+Install with an extra by appending it in square brackets:
+
+```bash
+# Emulator support only
+pip install "firestore-pydantic-odm[emulator]"
+
+# Emulator + dev tools (for contributors)
+pip install "firestore-pydantic-odm[emulator,dev]"
+```
+
+## Python Version Requirements
+
+Firestore Pydantic ODM requires **Python 3.8 or later**. The test matrix covers Python 3.9 through 3.12 on every release. Python 3.8 is supported by the install configuration but not included in the CI matrix.
+
+<Note>
+  The library relies on `async/await`, `typing.ClassVar`, `typing.Optional`, and `typing.AsyncGenerator`—all of which are available from Python 3.8 onwards.
+</Note>
+
+## Dependencies
+
+The following packages are installed automatically when you run `pip install firestore-pydantic-odm`:
+
+| Package | Required version | Purpose |
+|---|---|---|
+| `pydantic` | `>=1.5, <3.0.0` | Model definition, validation, and serialization |
+| `google-cloud-firestore` | `>=2.11.0` | Async Firestore client; `FieldFilter` requires ≥ 2.11.0 |
+| `packaging` | latest | Runtime Pydantic version detection via `packaging.version` |
+
+<Warning>
+  `google-cloud-firestore` version 2.11.0 introduced the `FieldFilter` API. Installing an older version will cause an `ImportError` at query time. Always ensure your environment meets the minimum version.
+</Warning>
+
+## Google Cloud Credentials
+
+### Production and staging
+
+Firestore Pydantic ODM delegates all authentication to the Google Cloud client libraries, which follow the [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials) resolution chain:
+
+1. **`GOOGLE_APPLICATION_CREDENTIALS` environment variable** — set this to the absolute path of a service-account JSON key file:
+
+   ```bash
+   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+   ```
+
+2. **`gcloud` user credentials** — run `gcloud auth application-default login` on a developer machine to store user credentials that the library will pick up automatically.
+
+3. **Attached service account** — when running on Google Cloud infrastructure (Cloud Run, GKE, Cloud Functions, App Engine, Compute Engine), the metadata server provides credentials without any additional setup.
+
+You can also pass an explicit `credentials` object directly to `FirestoreDB`:
+
+```python
+from google.oauth2 import service_account
+from firestore_pydantic_odm import FirestoreDB
+
+creds = service_account.Credentials.from_service_account_file(
+    "/path/to/service-account.json"
+)
+db = FirestoreDB(project_id="my-gcp-project", credentials=creds)
+```
+
+### Firestore emulator
+
+For local development and CI, the Firestore emulator lets you run a full Firestore instance on your machine without a network connection or a real GCP project.
+
+**Option 1 — environment variable (recommended for CI):**
+
+```bash
+export FIRESTORE_EMULATOR_HOST="localhost:8080"
+```
+
+When this variable is set, `FirestoreDB` automatically routes all traffic to the emulator.
+
+**Option 2 — `emulator_host=` constructor argument:**
+
+```python
+from firestore_pydantic_odm import FirestoreDB
+
+db = FirestoreDB(project_id="my-gcp-project", emulator_host="localhost:8080")
+```
+
+Passing `emulator_host=` sets `FIRESTORE_EMULATOR_HOST` in the process environment automatically, so subsequent client creations in the same process also point to the emulator.
+
+**Option 3 — `use_emulator()` at runtime:**
+
+```python
+db = FirestoreDB(project_id="my-gcp-project")
+db.use_emulator("localhost:8080")   # switches and recreates the async client
+```
+
+Call `db.clear_emulator()` to switch back to the production endpoint.
+
+<Tip>
+  Install the emulator with `pip install "firestore-pydantic-odm[emulator]"` and start it with `gcloud emulators firestore start --host-port=localhost:8080`. The emulator requires the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) to be installed.
+</Tip>
+
+## Pydantic Version Compatibility
+
+Both Pydantic v1 and Pydantic v2 are fully supported. The library ships an internal `pydantic_compat` module that inspects `pydantic.VERSION` at import time using `packaging.version.Version` and selects the correct shims automatically.
+
+| Pydantic version | Supported | Notes |
+|---|---|---|
+| v1 (`>=1.5, <2.0`) | ✅ Yes | `Config` class, `__fields__`, `.dict()` |
+| v2 (`>=2.0, <3.0`) | ✅ Yes | `model_config`, `model_fields`, `.model_dump()` |
+
+No changes to your model definitions are required when switching between Pydantic versions. The compatibility layer handles:
+
+- `model_dump` vs `.dict()`
+- `model_fields` vs `__fields__`
+- `ConfigDict` vs inner `Config` class
+- `PrivateAttr` declaration differences
+
+<Info>
+  When running Pydantic v2, the library automatically sets `model_config = ConfigDict(populate_by_name=True)` on `BaseFirestoreModel` so that both field names and aliases are accepted on construction. The equivalent `Config.allow_population_by_field_name = True` is set for Pydantic v1.
+</Info>
+
+## Verify Your Installation
+
+After installing, run the following snippet to confirm that the package imports correctly and that your credentials are configured:
+
+```python
+import asyncio
+from firestore_pydantic_odm import (
+    BaseFirestoreModel,
+    FirestoreDB,
+    init_firestore_odm,
+)
+
+
+class HealthCheck(BaseFirestoreModel):
+    class Settings:
+        name = "_health_check"
+
+    status: str = "ok"
+
+
+async def verify():
+    # Replace with your project ID, or use the emulator
+    db = FirestoreDB(project_id="my-gcp-project", emulator_host="localhost:8080")
+    init_firestore_odm(db, [HealthCheck])
+
+    doc = HealthCheck(status="ok")
+    await doc.save()
+    print(f"Saved document with id: {doc.id}")
+
+    fetched = await HealthCheck.get(doc.id)
+    print(f"Fetched status: {fetched.status}")
+
+    await doc.delete()
+    print("Document deleted — installation verified!")
+
+
+asyncio.run(verify())
+```
+
+If the script prints the three confirmation lines without raising an exception, your installation and credentials are working correctly.
+
+<Note>
+  If you see `google.auth.exceptions.DefaultCredentialsError`, either set `GOOGLE_APPLICATION_CREDENTIALS` to a valid service-account file or start the emulator and set `FIRESTORE_EMULATOR_HOST=localhost:8080` before running the script.
+</Note>

@@ -1,0 +1,310 @@
+---
+title: "SubCollectionAccessor — Subcollection Query Helper"
+sidebarTitle: "SubCollectionAccessor"
+description: "Bound query helper returned by BaseFirestoreModel.subcollection() that scopes all reads and writes to a specific parent document's subcollection."
+---
+
+`SubCollectionAccessor` provides a concise, parent-scoped interface for querying and mutating subcollection documents. You obtain an instance by calling `parent_instance.subcollection(ChildModel)` rather than constructing it directly. Every operation the accessor exposes is equivalent to calling the corresponding class method on the child model with `parent=parent_instance`, but the Beanie-inspired fluent style makes subcollection code easier to read.
+
+## Obtaining an accessor
+
+Call `subcollection()` on any hydrated `BaseFirestoreModel` instance and pass the child model class:
+
+```python
+user = await User.get("uid_abc123")
+posts = user.subcollection(Post)
+
+async for post in posts.find():
+    print(post.title)
+```
+
+`subcollection()` immediately validates that `Post.Settings.parent` equals `type(user)` (i.e. `User`). A `ValueError` is raised if the child class does not declare the correct parent type — this catches misconfigured models at the earliest possible moment.
+
+<Warning>
+  The child model class **must** declare `Settings.parent = User` (or whatever the parent type is). Passing a top-level collection model raises `ValueError: Post does not declare Settings.parent = User`.
+</Warning>
+
+```python
+class Post(BaseFirestoreModel):
+    class Settings:
+        name = "posts"
+        parent = User       # required for SubCollectionAccessor to accept it
+
+    title: str
+    published: bool = False
+```
+
+---
+
+## Methods
+
+### `add`
+
+Create a new document in the subcollection. Delegates to `doc.save(parent=self._parent, **kwargs)`.
+
+```python
+async def add(self, doc: BaseFirestoreModel, **kwargs) -> BaseFirestoreModel
+```
+
+<ParamField path="doc" type="BaseFirestoreModel" required>
+  An unsaved model instance to persist. If `doc.id` is `None`, Firestore auto-generates a document ID.
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Additional keyword arguments forwarded to `save()`. Supported keys include `exclude_none` (default `True`), `by_alias` (default `True`), and `exclude_unset` (default `True`).
+</ParamField>
+
+Returns the saved instance with `id` populated.
+
+```python
+post = Post(title="Hello World", published=True)
+await user.subcollection(Post).add(post)
+print(post.id)  # auto-generated
+```
+
+---
+
+### `get`
+
+Retrieve a single subcollection document by its document ID.
+
+```python
+async def get(self, doc_id: str) -> Optional[BaseFirestoreModel]
+```
+
+<ParamField path="doc_id" type="str" required>
+  The Firestore document ID to look up within the subcollection.
+</ParamField>
+
+Returns the hydrated child model instance, or `None` if no document with that ID exists in this parent's subcollection.
+
+```python
+post = await user.subcollection(Post).get("pid_xyz")
+if post:
+    print(post.title)
+```
+
+---
+
+### `find`
+
+Stream all documents in the subcollection that match the given filters. Returns an `AsyncGenerator` — iterate with `async for`.
+
+```python
+async def find(self, filters=None, **kwargs) -> AsyncGenerator
+```
+
+<ParamField path="filters" type="List[Tuple[FieldType, FirestoreOperators, Any]] | None">
+  Filter tuples to apply. Build them with `FirestoreField` expressions (`Post.published == True`) or raw `(field, operator, value)` tuples. Defaults to `None` (returns all documents).
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Additional keyword arguments forwarded to `BaseFirestoreModel.find()`. Supported keys include `projection`, `order_by`, `limit`, and `offset`.
+</ParamField>
+
+```python
+from firestore_pydantic_odm import OrderByDirection
+
+async for post in user.subcollection(Post).find(
+    filters=[Post.published == True],
+    order_by=(Post.created_at, OrderByDirection.DESCENDING),
+    limit=10,
+):
+    print(post.title)
+```
+
+---
+
+### `find_one`
+
+Return the first document in the subcollection that matches the given filters, or `None` if no match is found.
+
+```python
+async def find_one(self, filters=None, **kwargs) -> Optional[BaseFirestoreModel]
+```
+
+<ParamField path="filters" type="List[Tuple[FieldType, FirestoreOperators, Any]] | None">
+  Filter tuples. Passing `None` or `[]` returns the first document in the subcollection.
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Additional keyword arguments forwarded to `BaseFirestoreModel.find_one()`. Supported keys include `projection` and `order_by`.
+</ParamField>
+
+```python
+latest_post = await user.subcollection(Post).find_one(
+    filters=[Post.published == True],
+    order_by=(Post.created_at, OrderByDirection.DESCENDING),
+)
+```
+
+---
+
+### `count`
+
+Return the number of documents in the subcollection that match the given filters.
+
+```python
+async def count(self, filters=None) -> int
+```
+
+<ParamField path="filters" type="List[Tuple[FieldType, FirestoreOperators, Any]] | None">
+  Filter tuples. Passing `None` counts all documents in the subcollection.
+</ParamField>
+
+```python
+total = await user.subcollection(Post).count()
+published = await user.subcollection(Post).count([Post.published == True])
+print(f"{published}/{total} posts published")
+```
+
+---
+
+### `exists`
+
+Return `True` if a document with the given ID exists in this parent's subcollection.
+
+```python
+async def exists(self, doc_id: str) -> bool
+```
+
+<ParamField path="doc_id" type="str" required>
+  The Firestore document ID to check within the subcollection.
+</ParamField>
+
+```python
+if await user.subcollection(Post).exists("pid_xyz"):
+    print("Post exists")
+```
+
+---
+
+### `delete`
+
+Delete a document from the subcollection. The document instance must have a non-`None` `id`.
+
+```python
+async def delete(self, doc: BaseFirestoreModel) -> None
+```
+
+<ParamField path="doc" type="BaseFirestoreModel" required>
+  A hydrated child model instance to delete. Delegates to `doc.delete()` — the `cascade` parameter from `BaseFirestoreModel.delete` is not exposed here; call `doc.delete(cascade=True)` directly if you need recursive deletion.
+</ParamField>
+
+```python
+post = await user.subcollection(Post).get("pid_xyz")
+if post:
+    await user.subcollection(Post).delete(post)
+```
+
+---
+
+## Accessor vs. direct class methods
+
+Both styles are fully equivalent. The accessor is a syntactic convenience — choose whichever reads more clearly in your codebase.
+
+<CodeGroup>
+
+```python Accessor style
+user = await User.get("uid_abc123")
+accessor = user.subcollection(Post)
+
+# Create
+new_post = Post(title="Using the accessor")
+await accessor.add(new_post)
+
+# Query
+async for post in accessor.find([Post.published == True]):
+    print(post.title)
+
+# Get by ID
+post = await accessor.get("pid_xyz")
+
+# Count
+n = await accessor.count([Post.published == True])
+
+# Delete
+await accessor.delete(post)
+```
+
+```python Direct class method style
+user = await User.get("uid_abc123")
+
+# Create
+new_post = Post(title="Direct style")
+await new_post.save(parent=user)
+
+# Query
+async for post in Post.find(
+    filters=[Post.published == True],
+    parent=user,
+):
+    print(post.title)
+
+# Get by ID
+post = await Post.get("pid_xyz", parent=user)
+
+# Count
+n = await Post.count([Post.published == True], parent=user)
+
+# Delete
+await post.delete()
+```
+
+</CodeGroup>
+
+<Tip>
+  The accessor style is especially readable when you make multiple calls against the same parent–child pair in one function, because you only reference the parent once when constructing the accessor.
+</Tip>
+
+---
+
+## Full subcollection example
+
+```python
+from firestore_pydantic_odm import (
+    BaseFirestoreModel,
+    FirestoreDB,
+    init_firestore_odm,
+    OrderByDirection,
+)
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+    username: str
+
+class Post(BaseFirestoreModel):
+    class Settings:
+        name = "posts"
+        parent = User
+    title: str
+    published: bool = False
+
+db = FirestoreDB(project_id="my-project")
+init_firestore_odm(database=db, document_models=[User, Post])
+
+async def demo():
+    # Create a user
+    user = User(username="alice")
+    await user.save()
+
+    # Add posts via the accessor
+    posts_accessor = user.subcollection(Post)
+    await posts_accessor.add(Post(title="Draft post"))
+    await posts_accessor.add(Post(title="Published post", published=True))
+
+    # Query only published posts
+    async for post in posts_accessor.find(
+        filters=[Post.published == True],
+        order_by=(Post.title, OrderByDirection.ASCENDING),
+    ):
+        print(post.title)  # "Published post"
+
+    # Count
+    total = await posts_accessor.count()
+    print(f"{total} total posts")  # 2
+
+    # Clean up with cascade delete (removes user + all posts)
+    await user.delete(cascade=True)
+```

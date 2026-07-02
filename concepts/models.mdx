@@ -1,0 +1,187 @@
+---
+title: "Defining Firestore Models with Pydantic"
+sidebarTitle: "Models"
+description: "Learn how to define strongly-typed Firestore documents by subclassing BaseFirestoreModel, configuring collection settings, and declaring Pydantic fields."
+---
+
+Every document schema in Firestore Pydantic ODM is expressed as a Python class that extends `BaseFirestoreModel`. Because `BaseFirestoreModel` is itself a Pydantic `BaseModel`, you get automatic data validation, type coercion, and IDE auto-complete for free — the ODM simply adds the Firestore-specific plumbing on top.
+
+## BaseFirestoreModel and Pydantic BaseModel
+
+`BaseFirestoreModel` is a thin subclass of Pydantic's `BaseModel`. All standard Pydantic features — field types, validators, `Field(default=...)`, aliases, and nested models — work exactly as you would expect. The ODM extends the class with:
+
+- Class-level CRUD methods (`save`, `update`, `delete`, `find`, `find_one`, `get`).
+- A class variable `_db` that holds the injected `FirestoreDB` connection.
+- A private instance attribute `_parent_path` used to track subcollection document paths.
+- A class-level registry `_registered_models` used for cascade deletes.
+
+## The `Settings` Inner Class
+
+Every model must declare an inner `Settings` class that describes how the model maps to Firestore.
+
+| Attribute | Type | Purpose |
+|-----------|------|---------|
+| `name` | `str` | The Firestore **collection name** for top-level documents. |
+| `parent` | `Type[BaseFirestoreModel]` | The parent model type. Set this for **subcollection** models only. |
+
+```python
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"   # maps to the Firestore "users" collection
+
+class Post(BaseFirestoreModel):
+    class Settings:
+        name = "posts"
+        parent = User    # lives at users/{uid}/posts/{pid}
+```
+
+## The Automatic `id` Field
+
+Every `BaseFirestoreModel` subclass automatically gains an `id` field defined as `Optional[str] = None`. It maps directly to the Firestore document ID.
+
+- When you call `save()` and `id` is `None`, Firestore auto-generates one and assigns it back to `self.id`.
+- When you supply an explicit `id` before saving, that value is used as the document ID — if a document with that ID already exists, `save()` raises a `RuntimeError`.
+- After any `find`, `find_one`, or `get` call, the returned instance always has `id` populated.
+
+<Note>
+The `id` field is **excluded from the data written to Firestore**. It is never stored inside the document body — Firestore manages it as the document reference key. The ODM always passes `exclude={"id"}` when serialising a model for writes.
+</Note>
+
+## Field Definitions
+
+Fields are declared the same way as in any Pydantic model. Standard Python type annotations, `Optional` fields with defaults, and Pydantic `Field()` with aliases are all fully supported.
+
+```python
+from typing import Optional, List
+from pydantic import Field
+from firestore_pydantic_odm import BaseFirestoreModel
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    # Required fields
+    name: str
+    email: str
+
+    # Optional field with a default value
+    age: int = 0
+
+    # Field with an alias (stored as "phone_number" in Firestore)
+    phone: Optional[str] = Field(default=None, alias="phone_number")
+```
+
+## The `initialize_fields()` Class Method
+
+`initialize_fields()` is called automatically by `init_firestore_odm()` during application start-up. You rarely need to call it manually.
+
+Internally, it iterates over every Pydantic field on the class and attaches a `FirestoreField` descriptor as a class-level attribute. This gives you expressive, composable query syntax at the class level:
+
+```python
+# These expressions produce (field_name, operator, value) filter tuples
+User.age >= 18
+User.email == "alice@example.com"
+User.name != "Bob"
+```
+
+When the same attribute is accessed on an **instance**, the descriptor transparently returns the actual field value, so `user.age` still gives you the integer.
+
+## Initialising the Database Connection
+
+There are two ways to wire up the `FirestoreDB` client before using any model.
+
+<Tabs>
+  <Tab title="init_firestore_odm() — recommended">
+    `init_firestore_odm()` is the preferred approach. It accepts the database instance and a list of all model classes, registers them in `_registered_models` for cascade-delete discovery, injects `_db` into each class, and calls `initialize_fields()` on all of them in one shot.
+
+    ```python
+    from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+    from myapp.models import User, Post, Comment
+
+    db = FirestoreDB(project_id="my-gcp-project")
+
+    init_firestore_odm(db, [User, Post, Comment])
+    ```
+  </Tab>
+  <Tab title="initialize_db() — per-model">
+    `initialize_db()` is a class method that sets `_db` on a single model. Use this if you only have one or two models and don't need cascade deletes, or when integrating with a framework that initialises models lazily.
+
+    ```python
+    db = FirestoreDB(project_id="my-gcp-project")
+
+    User.initialize_db(db)
+    User.initialize_fields()
+
+    Post.initialize_db(db)
+    Post.initialize_fields()
+    ```
+
+    <Warning>
+    When using `initialize_db()` individually, `_registered_models` is **not** populated. Cascade deletes (`delete(cascade=True)`) depend on the model registry and will not discover child models unless you also set `BaseFirestoreModel._registered_models` manually.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Complete Model Example
+
+The following example defines two models — a top-level `User` and a `Post` subcollection — and shows how to initialise the ODM.
+
+```python
+from typing import Optional
+from pydantic import Field
+from firestore_pydantic_odm import BaseFirestoreModel, FirestoreDB, init_firestore_odm
+
+
+class User(BaseFirestoreModel):
+    """Top-level document stored at users/{id}."""
+
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+    age: int = 0
+    bio: Optional[str] = Field(default=None)
+
+
+class Post(BaseFirestoreModel):
+    """Subcollection document stored at users/{uid}/posts/{id}."""
+
+    class Settings:
+        name = "posts"
+        parent = User  # declare the parent relationship
+
+    title: str
+    body: str
+    published: bool = False
+
+
+# Wire everything up at application start
+db = FirestoreDB(project_id="my-gcp-project")
+init_firestore_odm(db, [User, Post])
+
+
+# --- Usage ---
+async def create_user_and_post():
+    user = User(name="Alice", email="alice@example.com", age=30)
+    await user.save()  # writes to users/{auto-id}
+
+    post = Post(title="Hello Firestore", body="This is my first post.")
+    await post.save(parent=user)  # writes to users/{user.id}/posts/{auto-id}
+
+    print(user.id)  # auto-generated document ID
+    print(post.id)  # auto-generated document ID
+```
+
+## Pydantic v1 / v2 Compatibility
+
+Firestore Pydantic ODM is tested against both Pydantic v1 and v2. Internally it uses a compatibility shim (`pydantic_compat`) that normalises differences between the two versions — `model_dump()` vs `dict()`, `model_fields` vs `__fields__`, `ConfigDict` vs the inner `Config` class, and so on. Your model definitions do not need any version-specific code; write standard Pydantic models and the ODM handles the rest.
+
+<CardGroup cols={2}>
+  <Card title="Database Client" icon="database" href="/concepts/database-client">
+    Configure production credentials, the emulator, and test mocks.
+  </Card>
+  <Card title="Subcollections" icon="sitemap" href="/concepts/subcollections">
+    Model parent-child relationships and query nested collections.
+  </Card>
+</CardGroup>

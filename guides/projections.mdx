@@ -1,0 +1,249 @@
+---
+title: "Using Field Projections for Efficient Firestore Reads"
+sidebarTitle: "Projections"
+description: "Use plain Pydantic models as field masks to fetch only the columns you need, reducing Firestore bandwidth and keeping response payloads lean."
+---
+
+By default, every query fetches the complete document from Firestore — all fields, regardless of whether your application actually uses them. Projections let you tell Firestore exactly which fields to return, transferring only the data you need. In Firestore Pydantic ODM, a projection is a plain `pydantic.BaseModel` class whose field names define the mask. You pass it to `find()` or `find_one()` and the returned instances are of that projection type, not the original model type.
+
+## How Projections Work
+
+When you provide a projection class to `find()` or `find_one()`, the ODM inspects the class's field definitions and calls Firestore's `.select()` API with only those field names. Firestore's server then strips all other fields before sending the response over the wire.
+
+Each document yielded by `find()` is constructed as an instance of your **projection class**, not the original model. This means you get a lean, validated object with only the fields you requested.
+
+```python
+from pydantic import BaseModel
+from firestore_pydantic_odm import BaseFirestoreModel
+
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+    age: int = 0
+
+
+# Projection: only the name field
+class UserNameProjection(BaseModel):
+    name: str
+
+
+async for user in User.find(projection=UserNameProjection):
+    print(type(user))   # <class 'UserNameProjection'>
+    print(user.name)    # ✅ available
+    # user.email        # ❌ AttributeError — not in projection
+```
+
+<Tip>
+Firestore bills per document read, not per byte transferred. However, projections reduce the payload size of each response, which decreases network latency and egress costs — especially important for large documents or high-throughput services.
+</Tip>
+
+---
+
+## Defining a Projection Model
+
+A projection model is a regular `pydantic.BaseModel` (not a `BaseFirestoreModel`) with one field per Firestore attribute you want to retrieve. Field names must match the Firestore document field names exactly, or you can use Pydantic's `alias=` to map a different Python name to the underlying Firestore field.
+
+```python
+from pydantic import BaseModel, Field
+
+
+# Simple projection — fetch only name and email
+class UserSummary(BaseModel):
+    name: str
+    email: str
+
+
+# Projection with alias — Firestore stores "createdAt", Python uses "created_at"
+class UserTimestamp(BaseModel):
+    name: str
+    created_at: str = Field(alias="createdAt")
+```
+
+<Note>
+When a field in your projection has an `alias`, the ODM uses the alias as the Firestore field name in the field mask. This ensures the `.select()` call requests the correct Firestore column even if your Python attribute has a different name.
+</Note>
+
+---
+
+## Using `projection=` in `find()`
+
+Pass your projection class to the `projection=` keyword argument of `find()`. You can combine it with any filters, ordering, and pagination parameters:
+
+```python
+from pydantic import BaseModel
+from firestore_pydantic_odm import OrderByDirection
+
+
+class UserSummary(BaseModel):
+    name: str
+    email: str
+
+
+# Fetch summaries of all adult users, sorted alphabetically
+async for summary in User.find(
+    filters=[User.age >= 18],
+    projection=UserSummary,
+    order_by=(User.name, OrderByDirection.ASCENDING),
+):
+    print(f"{summary.name} <{summary.email}>")
+```
+
+---
+
+## Using `projection=` in `find_one()`
+
+`find_one()` accepts the same `projection=` parameter and returns an instance of the projection class (or `None`):
+
+```python
+class UserNameProjection(BaseModel):
+    name: str
+
+
+result = await User.find_one(
+    filters=[User.email == "alice@example.com"],
+    projection=UserNameProjection,
+)
+
+if result:
+    print(result.name)          # ✅ "Alice"
+    print(type(result))         # <class 'UserNameProjection'>
+```
+
+---
+
+## Return Type is the Projection Class
+
+The yielded or returned objects are instances of the **projection class**, not the original model. Keep this in mind for type annotations and downstream logic:
+
+```python
+from typing import AsyncGenerator
+from pydantic import BaseModel
+
+
+class UserSummary(BaseModel):
+    name: str
+    email: str
+
+
+async def fetch_summaries() -> list[UserSummary]:
+    results: list[UserSummary] = []
+    async for summary in User.find(projection=UserSummary):
+        results.append(summary)
+    return results
+```
+
+<Warning>
+Because projection instances are plain `BaseModel` objects, they do not have Firestore methods like `.save()`, `.update()`, or `.delete()`. If you need to modify a document after fetching its projection, use `User.get(summary.id)` to load the full model instance first — but only if you include `id` in your projection.
+</Warning>
+
+---
+
+## Including `id` in a Projection
+
+The ODM always populates the `id` field from `doc.id` when constructing instances. To access the document ID on a projection, simply add `id: Optional[str] = None` to your projection class:
+
+```python
+from typing import Optional
+from pydantic import BaseModel
+
+
+class UserWithId(BaseModel):
+    id: Optional[str] = None
+    name: str
+
+
+async for user in User.find(projection=UserWithId):
+    print(user.id, user.name)
+    # Use the ID to load the full model when needed
+    full_user = await User.get(user.id)
+```
+
+---
+
+## Projections with Aliases
+
+When your model stores Firestore field names that differ from your Python attribute names (using Pydantic's `alias=`), your projection must use the same alias to ensure the field mask is correct:
+
+```python
+from pydantic import BaseModel, Field
+
+
+# Firestore document stores: { "firstName": "Alice", "lastName": "Smith" }
+class FullNameProjection(BaseModel):
+    first_name: str = Field(alias="firstName")
+    last_name: str  = Field(alias="lastName")
+
+
+async for user in User.find(projection=FullNameProjection):
+    print(user.first_name, user.last_name)
+```
+
+---
+
+## Complete Projection Example
+
+```python
+import asyncio
+from typing import Optional
+from pydantic import BaseModel
+from firestore_pydantic_odm import BaseFirestoreModel, FirestoreDB, OrderByDirection, init_firestore_odm
+
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+    age: int = 0
+    address: str = ""
+
+
+class UserSummary(BaseModel):
+    """Lightweight projection — skip address and age."""
+    id: Optional[str] = None
+    name: str
+    email: str
+
+
+async def main():
+    db = FirestoreDB(project_id="my-project")
+    init_firestore_odm(db, [User])
+
+    # Seed a few users
+    for first, mail in [("Alice", "alice@example.com"), ("Bob", "bob@example.com")]:
+        await User(name=first, email=mail, age=30, address="123 Main St").save()
+
+    # Query with projection
+    print("Summaries:")
+    async for summary in User.find(
+        projection=UserSummary,
+        order_by=(User.name, OrderByDirection.ASCENDING),
+    ):
+        print(f"  [{summary.id}] {summary.name} — {summary.email}")
+        # summary.address → AttributeError (not in projection)
+
+    # find_one with projection
+    alice = await User.find_one(
+        filters=[User.name == "Alice"],
+        projection=UserSummary,
+    )
+    if alice:
+        print(f"Single result: {alice.name}")
+
+
+asyncio.run(main())
+```
+
+<CardGroup cols={2}>
+  <Card title="Querying" icon="magnifying-glass" href="/guides/querying">
+    Explore the full filter, ordering, and pagination API.
+  </Card>
+  <Card title="FirestoreField API" icon="code" href="/api/firestore-field">
+    Reference for the descriptor that powers field-level filter expressions.
+  </Card>
+</CardGroup>

@@ -1,0 +1,507 @@
+---
+title: "BaseFirestoreModel — Async Firestore ODM Base Class"
+sidebarTitle: "BaseFirestoreModel"
+description: "Core ODM base class that extends Pydantic BaseModel with async Firestore CRUD, filtering, batch writes, subcollection access, and collection group queries."
+---
+
+`BaseFirestoreModel` is the foundation of the Firestore Pydantic ODM. Every document model in your application inherits from it, gaining a complete async CRUD interface — including filtering, pagination, batch operations, and subcollection traversal — while remaining a fully valid Pydantic model for serialization and validation.
+
+## Class overview
+
+`BaseFirestoreModel` extends Pydantic `BaseModel` and adds Firestore-aware behaviour through class-level injection of a `FirestoreDB` instance. All database operations are `async` and must be awaited (or iterated with `async for` in the case of generators). The class is compatible with both Pydantic v1 and v2.
+
+```python
+from firestore_pydantic_odm import BaseFirestoreModel, init_firestore_odm, FirestoreDB
+
+db = FirestoreDB(project_id="my-project")
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    username: str
+    email: str
+
+init_firestore_odm(database=db, document_models=[User])
+```
+
+## The `Settings` inner class
+
+Each model should define an inner `Settings` class to control how it maps to Firestore.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `name` | `str` | The Firestore collection name. Defaults to `"BaseCollection"` on the base class — always override this in subclasses. |
+| `parent` | `Type[BaseFirestoreModel]` | Set on subcollection models to declare the parent document type. Omit for top-level collections. |
+
+```python
+class Post(BaseFirestoreModel):
+    class Settings:
+        name = "posts"
+        parent = User   # makes Post a subcollection of User
+
+    title: str
+    published: bool = False
+```
+
+## The `id` field
+
+```python
+id: Optional[str] = Field(default=None)
+```
+
+Firestore document IDs are stored in the `id` field. When `id` is `None` at save time, Firestore auto-generates one. The field is excluded from serialised document data — it is stored only as the document key.
+
+---
+
+## Class methods
+
+### `initialize_db`
+
+Inject the `FirestoreDB` instance that all operations on this class will use. Called automatically by `init_firestore_odm` — you rarely need to call it directly.
+
+```python
+@classmethod
+def initialize_db(cls, db: FirestoreDB) -> None
+```
+
+<ParamField path="db" type="FirestoreDB" required>
+  The `FirestoreDB` wrapper instance containing the underlying `AsyncClient`.
+</ParamField>
+
+---
+
+### `initialize_fields`
+
+Attach `FirestoreField` descriptors to every Pydantic field on the class so that filter expressions like `User.email == "alice@example.com"` produce the correct Firestore `FieldFilter` tuples. Called automatically by `init_firestore_odm`.
+
+```python
+@classmethod
+def initialize_fields(cls) -> None
+```
+
+<Note>
+  After `initialize_fields` runs, accessing a class attribute such as `User.email` returns a `FirestoreField` object that supports `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, and `array_contains` operators to build filter tuples.
+</Note>
+
+---
+
+### `get`
+
+Retrieve a single document by its Firestore document ID.
+
+```python
+@classmethod
+async def get(
+    cls,
+    doc_id: str,
+    parent: Optional[BaseFirestoreModel] = None,
+) -> Optional[Self]
+```
+
+<ParamField path="doc_id" type="str" required>
+  The Firestore document ID to look up.
+</ParamField>
+
+<ParamField path="parent" type="BaseFirestoreModel | None">
+  Parent document instance required when this model is a subcollection. Omit for top-level collections.
+</ParamField>
+
+Returns the hydrated model instance, or `None` if no document with that ID exists.
+
+```python
+user = await User.get("uid_abc123")
+
+# Subcollection variant
+post = await Post.get("pid_xyz", parent=user)
+```
+
+---
+
+### `exists`
+
+Return `True` if a document with the given ID exists in Firestore, without fetching its data.
+
+```python
+@classmethod
+async def exists(
+    cls,
+    doc_id: str,
+    parent: Optional[BaseFirestoreModel] = None,
+) -> bool
+```
+
+<ParamField path="doc_id" type="str" required>
+  The Firestore document ID to check.
+</ParamField>
+
+<ParamField path="parent" type="BaseFirestoreModel | None">
+  Parent document instance for subcollection models.
+</ParamField>
+
+```python
+if await User.exists("uid_abc123"):
+    print("User exists")
+```
+
+---
+
+### `find`
+
+Asynchronously stream documents matching the given filters. Returns an `AsyncGenerator` — iterate with `async for`.
+
+```python
+@classmethod
+async def find(
+    cls,
+    filters: List[Tuple[FieldType, FirestoreOperators, Any]] = None,
+    parent: Optional[BaseFirestoreModel] = None,
+    projection: Optional[Type[BaseModel]] = None,
+    order_by: Optional[Union[List[Union[FieldType, FieldOrderType]], FieldType, FieldOrderType]] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> AsyncGenerator
+```
+
+<ParamField path="filters" type="List[Tuple[FieldType, FirestoreOperators, Any]] | None">
+  A list of filter tuples. Each tuple is `(field, operator, value)`. Build tuples with `FirestoreField` expressions such as `User.email == "alice@example.com"` or raw strings `("email", "==", "alice@example.com")`. Defaults to `[]` (no filters — returns all documents).
+</ParamField>
+
+<ParamField path="parent" type="BaseFirestoreModel | None">
+  Parent document instance for subcollection models.
+</ParamField>
+
+<ParamField path="projection" type="Type[BaseModel] | None">
+  A Pydantic model class containing only the fields you want retrieved. Reduces bandwidth by using Firestore field projection.
+</ParamField>
+
+<ParamField path="order_by" type="FieldType | FieldOrderType | List | None">
+  A field or list of fields to sort by. Pass a `(field, OrderByDirection)` tuple for explicit direction, or just a field for the default ascending order.
+</ParamField>
+
+<ParamField path="limit" type="int | None">
+  Maximum number of documents to return.
+</ParamField>
+
+<ParamField path="offset" type="int | None">
+  Number of documents to skip before returning results.
+</ParamField>
+
+```python
+from firestore_pydantic_odm import OrderByDirection
+
+# All active users, newest first, page 2
+async for user in User.find(
+    filters=[User.active == True],
+    order_by=(User.created_at, OrderByDirection.DESCENDING),
+    limit=20,
+    offset=20,
+):
+    print(user.username)
+```
+
+---
+
+### `find_one`
+
+Return the first document matching the given filters, or `None` if no match is found. Internally calls `find(..., limit=1)`.
+
+```python
+@classmethod
+async def find_one(
+    cls,
+    filters: List[Tuple[str, str, Any]],
+    parent: Optional[BaseFirestoreModel] = None,
+    projection: Optional[Type[BaseModel]] = None,
+    order_by: Optional[Union[FieldType, FieldOrderType]] = None,
+) -> Optional[Self]
+```
+
+<ParamField path="filters" type="List[Tuple[str, str, Any]]" required>
+  Filter tuples identical to those accepted by `find`.
+</ParamField>
+
+<ParamField path="parent" type="BaseFirestoreModel | None">
+  Parent document instance for subcollection models.
+</ParamField>
+
+<ParamField path="projection" type="Type[BaseModel] | None">
+  Optional Pydantic model class for field projection.
+</ParamField>
+
+<ParamField path="order_by" type="FieldType | FieldOrderType | None">
+  Field to sort by to determine which document is "first".
+</ParamField>
+
+```python
+user = await User.find_one([User.email == "alice@example.com"])
+if user:
+    print(user.username)
+```
+
+---
+
+### `count`
+
+Return the number of documents that match the given filters using Firestore's native `count()` aggregation. Falls back to fetching all document IDs if the SDK version does not support `count()`.
+
+```python
+@classmethod
+async def count(
+    cls,
+    filters: List[Tuple[str, str, Any]],
+    parent: Optional[BaseFirestoreModel] = None,
+) -> int
+```
+
+<ParamField path="filters" type="List[Tuple[str, str, Any]]" required>
+  Filter tuples. Pass an empty list `[]` to count all documents in the collection.
+</ParamField>
+
+<ParamField path="parent" type="BaseFirestoreModel | None">
+  Parent document instance for subcollection models.
+</ParamField>
+
+```python
+active_count = await User.count([User.active == True])
+print(f"{active_count} active users")
+```
+
+---
+
+### `batch_write`
+
+Execute multiple create, update, and delete operations atomically in a single Firestore batch commit.
+
+```python
+@classmethod
+async def batch_write(
+    cls,
+    operations: List[Tuple[BatchOperation, BaseFirestoreModel]],
+) -> None
+```
+
+<ParamField path="operations" type="List[Tuple[BatchOperation, BaseFirestoreModel]]" required>
+  A list of `(BatchOperation, model_instance)` tuples. `BatchOperation` is an enum with values `CREATE`, `UPDATE`, and `DELETE`. The model instances do not need to belong to the same collection — the collection is inferred from each instance's class.
+</ParamField>
+
+<Warning>
+  For `UPDATE` and `DELETE` operations the model instance must have a non-`None` `id`. Only `CREATE` can operate on instances without a pre-assigned ID; Firestore will generate one automatically.
+</Warning>
+
+```python
+from firestore_pydantic_odm import BatchOperation
+
+alice = User(username="alice", email="alice@example.com")
+old_user = await User.get("uid_old")
+
+await User.batch_write([
+    (BatchOperation.CREATE, alice),
+    (BatchOperation.DELETE, old_user),
+])
+```
+
+---
+
+### `collection_group_find`
+
+Query across **all** subcollections sharing this model's collection name, regardless of which parent document they belong to. Uses Firestore's `collection_group()` API.
+
+```python
+@classmethod
+async def collection_group_find(
+    cls,
+    filters: List[Tuple[FieldType, FirestoreOperators, Any]] = None,
+    projection: Optional[Type[BaseModel]] = None,
+    order_by: Optional[Union[List[Union[FieldType, FieldOrderType]], FieldType, FieldOrderType]] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> AsyncGenerator
+```
+
+<ParamField path="filters" type="List[Tuple[FieldType, FirestoreOperators, Any]] | None">
+  Filter tuples applied across all matching subcollections. Defaults to `[]`.
+</ParamField>
+
+<ParamField path="projection" type="Type[BaseModel] | None">
+  Optional Pydantic model class for field projection.
+</ParamField>
+
+<ParamField path="order_by" type="FieldType | FieldOrderType | List | None">
+  Field(s) to sort results by.
+</ParamField>
+
+<ParamField path="limit" type="int | None">
+  Maximum number of documents to return across all parents.
+</ParamField>
+
+<ParamField path="offset" type="int | None">
+  Number of matching documents to skip.
+</ParamField>
+
+<Note>
+  Collection group queries require a Firestore composite index. The `_parent_path` attribute is automatically populated on each returned instance from the document's reference path.
+</Note>
+
+```python
+# Find all published posts across every user
+async for post in Post.collection_group_find([Post.published == True]):
+    print(post.title, post._parent_path)
+```
+
+---
+
+## Instance methods
+
+### `save`
+
+Persist a new document to Firestore. If `id` is `None`, Firestore generates a unique document ID and assigns it to the instance. Raises `RuntimeError` if an explicit `id` is provided but a document with that ID already exists.
+
+```python
+async def save(
+    self,
+    parent: Optional[BaseFirestoreModel] = None,
+    exclude_none: bool = True,
+    by_alias: bool = True,
+    exclude_unset: bool = True,
+) -> Self
+```
+
+<ParamField path="parent" type="BaseFirestoreModel | None">
+  Parent document instance. Required for subcollection models if `_parent_path` is not already stored on the instance.
+</ParamField>
+
+<ParamField path="exclude_none" type="bool" default="True">
+  When `True`, fields with `None` values are not written to Firestore.
+</ParamField>
+
+<ParamField path="by_alias" type="bool" default="True">
+  When `True`, field aliases are used as Firestore field names in the document.
+</ParamField>
+
+<ParamField path="exclude_unset" type="bool" default="True">
+  When `True`, fields that were not explicitly set during model construction are omitted from the write.
+</ParamField>
+
+Returns the same instance with `id` populated.
+
+```python
+user = User(username="alice", email="alice@example.com")
+await user.save()
+print(user.id)  # auto-generated Firestore ID
+```
+
+---
+
+### `update`
+
+Update fields on an **existing** Firestore document. The instance must have a non-`None` `id`. Only fields that pass the exclusion rules are sent to Firestore.
+
+```python
+async def update(
+    self,
+    parent: Optional[BaseFirestoreModel] = None,
+    include: Optional[set] = None,
+    exclude_none: bool = True,
+    by_alias: bool = True,
+    exclude_unset: bool = True,
+) -> Self
+```
+
+<ParamField path="parent" type="BaseFirestoreModel | None">
+  Parent document instance for subcollection models.
+</ParamField>
+
+<ParamField path="include" type="set | None">
+  An explicit set of field names to include in the update. When provided, only those fields are written — all other exclusion rules still apply within the included set.
+</ParamField>
+
+<ParamField path="exclude_none" type="bool" default="True">
+  Omit fields whose value is `None`.
+</ParamField>
+
+<ParamField path="by_alias" type="bool" default="True">
+  Use field aliases as Firestore field names.
+</ParamField>
+
+<ParamField path="exclude_unset" type="bool" default="True">
+  Omit fields that were not explicitly set on the instance.
+</ParamField>
+
+Returns the same instance after the update.
+
+```python
+user = await User.get("uid_abc123")
+user.email = "newemail@example.com"
+await user.update(include={"email"})
+```
+
+---
+
+### `delete`
+
+Delete the document from Firestore. The instance must have a non-`None` `id`.
+
+```python
+async def delete(self, cascade: bool = False) -> None
+```
+
+<ParamField path="cascade" type="bool" default="False">
+  When `True`, all subcollection documents under this document are recursively deleted before the document itself is removed. Requires subcollection model classes to be registered via `init_firestore_odm`.
+</ParamField>
+
+<Warning>
+  Cascade deletion can be expensive for documents with large subcollections. It fetches every child document individually. Consider using Firestore's built-in recursive delete for large datasets.
+</Warning>
+
+```python
+user = await User.get("uid_abc123")
+
+# Delete only the user document
+await user.delete()
+
+# Delete the user and all their posts, comments, etc.
+await user.delete(cascade=True)
+```
+
+---
+
+### `subcollection`
+
+Return a `SubCollectionAccessor` bound to this instance and the given child model class, enabling Beanie-style subcollection query syntax.
+
+```python
+def subcollection(self, child_cls: Type[BaseFirestoreModel]) -> SubCollectionAccessor
+```
+
+<ParamField path="child_cls" type="Type[BaseFirestoreModel]" required>
+  The subcollection model class. Must declare `Settings.parent = type(self)` or a `ValueError` is raised.
+</ParamField>
+
+```python
+user = await User.get("uid_abc123")
+accessor = user.subcollection(Post)
+
+async for post in accessor.find([Post.published == True]):
+    print(post.title)
+```
+
+See the [`SubCollectionAccessor`](/api/subcollection-accessor) reference for the full accessor API.
+
+---
+
+## Properties
+
+### `collection_name`
+
+Return the Firestore collection name for the instance's class, as declared in `Settings.name`. Falls back to the class name if `Settings.name` is not defined.
+
+```python
+@property
+def collection_name(self) -> str
+```
+
+```python
+user = User(username="alice", email="alice@example.com")
+print(user.collection_name)  # "users"
+```

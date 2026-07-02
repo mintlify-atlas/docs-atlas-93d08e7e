@@ -1,47 +1,286 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Firestore Pydantic ODM"
+sidebarTitle: "Quickstart"
+description: "Learn how to install Firestore Pydantic ODM, define your first model, connect to Firestore, and perform async CRUD and queries in minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you through everything you need to go from a blank Python environment to a fully working Firestore-backed application using Firestore Pydantic ODM. Each step builds on the previous one, and a complete runnable snippet is provided at the end so you can verify your setup immediately.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Install the package
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Install Firestore Pydantic ODM from PyPI using pip:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+```bash
+pip install firestore-pydantic-odm
+```
+
+If you plan to develop locally against the Firestore emulator, install the optional emulator extra as well:
+
+```bash
+pip install "firestore-pydantic-odm[emulator]"
+```
+
+### Set up Google credentials
+
+The library uses the official `google-cloud-firestore` async client, which follows the standard Google Application Default Credentials (ADC) chain.
+
+**For production or staging**, point the environment variable at your service-account key file:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+**For local development with the emulator**, start the emulator and export its host:
+
+```bash
+export FIRESTORE_EMULATOR_HOST="localhost:8080"
+```
+
+You can also pass `emulator_host=` directly to `FirestoreDB` at runtime instead of setting the environment variable—the library will configure the environment variable for you automatically.
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  If you are running inside Google Cloud (Cloud Run, GKE, Cloud Functions, etc.) no extra configuration is needed—the metadata server provides credentials automatically.
 </Tip>
+
+### Define a model
+
+Subclass `BaseFirestoreModel` and declare the Firestore collection name in an inner `Settings` class. Add your document fields as ordinary Pydantic field annotations:
+
+```python
+from firestore_pydantic_odm import BaseFirestoreModel
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"  # Firestore collection name
+
+    name: str
+    email: str
+    age: int = 0
+```
+
+Every model automatically gets an `id: Optional[str]` field that stores the Firestore document ID. You do not need to declare it yourself.
+
+<Note>
+  The `Settings.name` attribute is required. If you omit it, the library falls back to the class name, which is usually not what you want for production collections.
+</Note>
+
+### Initialize the database
+
+Create a `FirestoreDB` instance and call `init_firestore_odm()` with it and a list of every model class your application uses. This step injects the database client into each model and registers the model graph for cascade-delete resolution:
+
+```python
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+
+# Connect to the real Firestore backend
+db = FirestoreDB(project_id="my-gcp-project")
+
+# Or connect to the local emulator
+db = FirestoreDB(project_id="my-gcp-project", emulator_host="localhost:8080")
+
+# Register all models — pass every model class you intend to use
+init_firestore_odm(db, [User])
+```
+
+<Warning>
+  Always call `init_firestore_odm()` before performing any database operation. Attempting to call `save()`, `find()`, or any other async method before initialization raises a `RuntimeError`.
+</Warning>
+
+### Perform async CRUD
+
+All document operations are `async` and must be awaited. Use `save()` to create, `update()` to persist changes, `delete()` to remove, and `get()` to fetch a document by its ID:
+
+```python
+import asyncio
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm, BaseFirestoreModel
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+
+async def crud_example():
+    db = FirestoreDB(project_id="my-gcp-project", emulator_host="localhost:8080")
+    init_firestore_odm(db, [User])
+
+    # CREATE — Firestore auto-generates the document ID
+    user = User(name="Alice", email="alice@example.com")
+    await user.save()
+    print(f"Created user with id: {user.id}")
+
+    # UPDATE — mutate fields and call update()
+    user.email = "alice@new.example.com"
+    await user.update()
+
+    # GET — retrieve a document by its Firestore document ID
+    fetched = await User.get(user.id)
+    print(f"Fetched: {fetched.name} — {fetched.email}")
+
+    # DELETE — permanently removes the document
+    await user.delete()
+
+asyncio.run(crud_example())
+```
+
+### Query with find() and find_one()
+
+`find()` is an async generator that streams matching documents. `find_one()` returns the first match or `None`. Both accept `filters`, `order_by`, `limit`, `offset`, and an optional `projection`:
+
+```python
+import asyncio
+from pydantic import BaseModel
+from firestore_pydantic_odm import (
+    FirestoreDB, init_firestore_odm, BaseFirestoreModel,
+    OrderByDirection,
+)
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+    age: int = 0
+
+# Projection — only fetch the fields you need
+class UserProjection(BaseModel):
+    name: str
+
+async def query_example():
+    db = FirestoreDB(project_id="my-gcp-project", emulator_host="localhost:8080")
+    init_firestore_odm(db, [User])
+
+    # Stream all users ordered by name ascending
+    async for u in User.find(order_by=[(User.name, OrderByDirection.ASCENDING)]):
+        print(u)
+
+    # Filter — find users aged 18 or older
+    async for u in User.find(filters=[User.age >= 18]):
+        print(u.name)
+
+    # Projection — Firestore only transfers the `name` field
+    async for u in User.find(
+        filters=[User.age >= 18],
+        projection=UserProjection,
+        order_by=[(User.name, OrderByDirection.ASCENDING)],
+    ):
+        print(u.name)  # u is a UserProjection instance
+
+    # find_one — return the first matching document
+    alice = await User.find_one(filters=[User.email == "alice@example.com"])
+    if alice:
+        print(f"Found: {alice.name}")
+
+asyncio.run(query_example())
+```
+
+</Steps>
+
+## Complete Working Example
+
+The snippet below combines every step above into a single `asyncio.run()` call you can copy, adjust the `project_id` and `emulator_host`, and run immediately:
+
+```python
+import asyncio
+from pydantic import BaseModel
+from firestore_pydantic_odm import (
+    FirestoreDB,
+    BaseFirestoreModel,
+    BatchOperation,
+    OrderByDirection,
+    init_firestore_odm,
+)
+
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+    age: int = 0
+
+
+class UserProjection(BaseModel):
+    name: str
+
+
+async def main():
+    # 1. Connect (emulator)
+    db = FirestoreDB(project_id="my-gcp-project", emulator_host="localhost:8080")
+    init_firestore_odm(db, [User])
+
+    # 2. Create documents
+    alice = User(name="Alice", email="alice@example.com", age=30)
+    await alice.save()
+
+    bob = User(name="Bob", email="bob@example.com", age=17)
+    await bob.save()
+
+    # 3. Update a field
+    alice.email = "alice@new.example.com"
+    await alice.update()
+
+    # 4. Get by ID
+    fetched = await User.get(alice.id)
+    print(f"Fetched: {fetched.name} — {fetched.email}")
+
+    # 5. Query — all users ordered by name
+    print("All users:")
+    async for u in User.find(order_by=[(User.name, OrderByDirection.ASCENDING)]):
+        print(f"  {u.name}")
+
+    # 6. Query with projection (only `name` field transferred)
+    print("Adults (projection):")
+    async for u in User.find(
+        filters=[User.age >= 18],
+        projection=UserProjection,
+    ):
+        print(f"  {u.name}")
+
+    # 7. find_one
+    first = await User.find_one(
+        filters=[],
+        order_by=(User.name, OrderByDirection.ASCENDING),
+    )
+    print(f"First user alphabetically: {first.name}")
+
+    # 8. Batch write
+    ops = [
+        (BatchOperation.CREATE, User(name="Carol", email="carol@example.com", age=25)),
+        (BatchOperation.DELETE, bob),
+    ]
+    await User.batch_write(ops)
+
+    # 9. Delete
+    await alice.delete()
+
+
+asyncio.run(main())
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="box" href="/installation">
+    Detailed install options, dependency versions, and credential setup for all environments.
+  </Card>
+  <Card title="Models" icon="cube" href="/concepts/models">
+    Learn how to define fields, aliases, nested objects, and model configuration.
+  </Card>
+  <Card title="Querying" icon="magnifying-glass" href="/guides/querying">
+    Filters, ordering, pagination, projections, and collection-group queries.
+  </Card>
+  <Card title="Subcollections" icon="sitemap" href="/concepts/subcollections">
+    Declare parent–child relationships and query deeply nested documents.
+  </Card>
+  <Card title="Batch Operations" icon="layer-group" href="/guides/batch-operations">
+    Atomic multi-document writes and transactions.
+  </Card>
+  <Card title="Testing" icon="flask" href="/guides/testing">
+    Emulator setup and unit-test mocking strategies.
+  </Card>
+</CardGroup>

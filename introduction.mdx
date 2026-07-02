@@ -1,0 +1,62 @@
+---
+title: "Firestore Pydantic ODM: Async Python ODM for Firestore"
+sidebarTitle: "Introduction"
+description: "Firestore Pydantic ODM is a lightweight, fully-typed async Object-Document Mapper that combines Pydantic validation with Google Cloud Firestore."
+---
+
+Firestore Pydantic ODM bridges the gap between Pydantic's powerful data-validation layer and Google Cloud Firestore's scalable NoSQL backend. Define your collections as ordinary Pydantic models, and the library handles async CRUD, batch writes, transactions, subcollections, and field-masked projections—so your code stays clean, typed, and efficient.
+
+## What Is Firestore Pydantic ODM?
+
+Firestore Pydantic ODM is an open-source Python library published by Santos Dev Co under the BSD-3-Clause license. It wraps the official `google-cloud-firestore` async client in an ODM layer driven entirely by Pydantic model definitions. Every document in a Firestore collection maps to a subclass of `BaseFirestoreModel`, which carries its collection name in an inner `Settings` class and inherits a full suite of async class methods for querying and writing data.
+
+The library auto-detects whether you are running Pydantic v1 or v2 at import time and adjusts its internal compatibility shims accordingly, so you can adopt it in any existing project without having to migrate your Pydantic version first.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Async CRUD" icon="bolt" href="/quickstart">
+    Create, read, update, and delete Firestore documents with native `async/await` using `save()`, `update()`, `delete()`, and `get()`.
+  </Card>
+  <Card title="Pydantic Validation" icon="shield-check" href="/concepts/models">
+    Define collections as Pydantic models and get automatic field validation, type coercion, and IDE auto-complete out of the box.
+  </Card>
+  <Card title="Advanced Querying" icon="magnifying-glass" href="/guides/querying">
+    Filter, order, paginate, and project results with `find()` and `find_one()`. Projections generate Firestore field masks so only requested fields are fetched.
+  </Card>
+  <Card title="Batch Operations" icon="layer-group" href="/guides/batch-operations">
+    Group multiple creates, updates, and deletes into a single atomic `batch_write()` call for consistency and lower RPC overhead.
+  </Card>
+  <Card title="Subcollections" icon="sitemap" href="/concepts/subcollections">
+    Declare parent–child relationships with `Settings.parent` and traverse nested collections with the fluent `subcollection()` accessor.
+  </Card>
+  <Card title="Emulator & Testing" icon="flask" href="/guides/testing">
+    Switch to the Firestore emulator with a single argument, or replace the client with a `MagicMock` for fully isolated unit tests.
+  </Card>
+  <Card title="Projections" icon="filter" href="/guides/projections">
+    Pass any Pydantic `BaseModel` as a `projection=` argument to `find()` or `find_one()` to fetch only the fields you actually need.
+  </Card>
+  <Card title="Database Client" icon="database" href="/concepts/database-client">
+    `FirestoreDB` wraps the async Firestore client and handles credential resolution, emulator toggling, and mock injection in one place.
+  </Card>
+</CardGroup>
+
+## Requirements
+
+Before installing, make sure your environment meets the following minimum requirements:
+
+- **Python 3.8 or later** — the library uses `async/await` throughout and requires the `typing` module features available from Python 3.8 onwards.
+- **Pydantic v1 (`>=1.5`) or Pydantic v2 (`<3.0.0`)** — both major versions are supported; the correct compatibility layer is selected automatically at runtime.
+- **`google-cloud-firestore>=2.11.0`** — version 2.11.0 introduced the `FieldFilter` API that powers the query builder.
+
+## Pydantic v1 / v2 Compatibility
+
+Firestore Pydantic ODM ships an internal `pydantic_compat` module that detects your installed Pydantic version at import time using the `packaging` library. All internal calls—`model_dump`, field introspection, `ConfigDict`—are routed through version-aware wrappers, so you never need to change your model definitions when upgrading Pydantic.
+
+<Note>
+  If you are running Pydantic v2, the library configures `model_config = ConfigDict(populate_by_name=True)` automatically. For Pydantic v1, the equivalent `Config.allow_population_by_field_name = True` is applied instead.
+</Note>
+
+## License
+
+Firestore Pydantic ODM is distributed under the **BSD-3-Clause License**. See the [`LICENSE`](https://github.com/santosdevco/firestore-pydantic-odm/blob/master/LICENSE) file in the repository for the full license text.

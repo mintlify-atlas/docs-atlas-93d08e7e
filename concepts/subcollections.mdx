@@ -1,0 +1,280 @@
+---
+title: "Subcollections and Parent-Child Relationships"
+sidebarTitle: "Subcollections"
+description: "Model nested Firestore subcollections with Settings.parent, query documents under a specific parent, and cascade-delete entire document hierarchies safely."
+---
+
+Firestore subcollections are collections that live **under a specific document** rather than at the root of the database. A common pattern is storing a user's posts at `users/{uid}/posts` or a post's comments at `users/{uid}/posts/{pid}/comments`. Firestore Pydantic ODM gives you first-class support for this hierarchy through the `Settings.parent` attribute, path-aware query methods, and a `SubCollectionAccessor` convenience wrapper.
+
+## Declaring a Subcollection
+
+To declare a subcollection model, add a `parent` attribute to the model's inner `Settings` class and point it at the parent model type. Leave `parent` unset (or absent) for top-level collections.
+
+```python
+from firestore_pydantic_odm import BaseFirestoreModel
+
+
+class User(BaseFirestoreModel):
+    """Top-level collection: users/{id}"""
+
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+    age: int = 0
+
+
+class Post(BaseFirestoreModel):
+    """Subcollection: users/{uid}/posts/{id}"""
+
+    class Settings:
+        name = "posts"
+        parent = User  # ← declare the parent relationship
+
+    title: str
+    body: str
+    published: bool = False
+
+
+class Comment(BaseFirestoreModel):
+    """Deeply nested: users/{uid}/posts/{pid}/comments/{id}"""
+
+    class Settings:
+        name = "comments"
+        parent = Post  # ← Post is itself a subcollection of User
+
+    text: str
+    author: str
+```
+
+## How Paths Resolve
+
+The ODM builds the full Firestore path at runtime by walking the `Settings.parent` chain. Given the models above:
+
+| Model | Resolved collection path |
+|-------|--------------------------|
+| `User` | `users` |
+| `Post` (with user) | `users/{uid}/posts` |
+| `Comment` (with post) | `users/{uid}/posts/{pid}/comments` |
+
+No manual path construction is needed — the ODM calls `_resolve_collection_ref()` internally every time a CRUD method is invoked.
+
+## Creating Subcollection Documents
+
+Pass the **parent instance** to `save()` when creating a subcollection document. The parent must already have an `id` (i.e. it must have been saved first).
+
+```python
+async def create_post_for_user():
+    # 1. Create and save the parent
+    user = User(name="Alice", email="alice@example.com")
+    await user.save()
+    # user.id is now populated, e.g. "abc123"
+
+    # 2. Create the child, passing parent=user
+    post = Post(title="Hello Firestore", body="My first post.")
+    await post.save(parent=user)
+    # Stored at: users/abc123/posts/{auto-id}
+
+    print(post.id)           # auto-generated post ID
+    print(post._parent_path) # "users/abc123" — stored for subsequent calls
+```
+
+After a successful `save()`, the ODM stores the resolved parent document path in `post._parent_path`. Any subsequent `update()` or `delete()` call on the same instance no longer requires `parent=` because the path is already known.
+
+## Querying a Subcollection
+
+All read methods accept an optional `parent=` argument that scopes the query to the documents under that specific parent document.
+
+### `find()` with a parent
+
+```python
+async def list_user_posts(user: User):
+    async for post in Post.find(parent=user):
+        print(post.title, post.published)
+
+    # With filters
+    async for post in Post.find(
+        filters=[Post.published == True],
+        parent=user,
+    ):
+        print(post.title)
+```
+
+### `find_one()` with a parent
+
+```python
+async def get_latest_post(user: User):
+    from firestore_pydantic_odm import OrderByDirection
+
+    post = await Post.find_one(
+        filters=[Post.published == True],
+        parent=user,
+        order_by=(Post.title, OrderByDirection.DESC),
+    )
+    if post:
+        print(post.title)
+```
+
+### `get()` by document ID
+
+```python
+async def get_post_by_id(user: User, post_id: str):
+    post = await Post.get(post_id, parent=user)
+    if post:
+        print(post.body)
+```
+
+## Updating and Deleting Subcollection Documents
+
+Once an instance has `_parent_path` set (either from `save()` or `find()`), updates and deletes work without a `parent=` argument.
+
+```python
+async def update_and_delete(user: User, post_id: str):
+    post = await Post.get(post_id, parent=user)
+    # post._parent_path is now "users/{user.id}"
+
+    post.published = True
+    await post.update()         # no parent= needed
+
+    await post.delete()         # deletes users/{user.id}/posts/{post.id}
+```
+
+## Cascade Delete
+
+Calling `delete(cascade=True)` on a document first recursively deletes all subcollection documents under it, then deletes the document itself. The ODM discovers child models by inspecting `_registered_models` — every model whose `Settings.parent` points to the current class is considered a child.
+
+```python
+async def remove_user_and_all_data(user_id: str):
+    user = await User.get(user_id)
+    if user:
+        await user.delete(cascade=True)
+        # Deletes: users/{uid}/posts/* (and each post's comments)
+        # Then deletes: users/{uid}
+```
+
+<Warning>
+Cascade delete requires all models to be registered via `init_firestore_odm()`. If you use per-model `initialize_db()` without populating `BaseFirestoreModel._registered_models`, child models will not be discovered and only the target document will be deleted.
+</Warning>
+
+## SubCollectionAccessor
+
+`SubCollectionAccessor` is a convenience wrapper that binds a parent instance to a child model class, giving you a clean object-oriented API for subcollection operations.
+
+Access it via `parent_instance.subcollection(ChildModel)`:
+
+```python
+async def accessor_examples(user: User):
+    # Build the accessor once
+    posts = user.subcollection(Post)
+
+    # Add a new document to the subcollection
+    new_post = Post(title="Via Accessor", body="Convenient!")
+    await posts.add(new_post)
+
+    # Iterate over all documents
+    async for post in posts.find():
+        print(post.title)
+
+    # Filter
+    async for post in posts.find(filters=[Post.published == True]):
+        print(post.title)
+
+    # Fetch a single document by ID
+    post = await posts.get(new_post.id)
+
+    # Count documents
+    total = await posts.count()
+
+    # Check existence
+    exists = await posts.exists(new_post.id)
+```
+
+`SubCollectionAccessor` validates at construction time that `ChildModel.Settings.parent` matches the type of the parent instance. Passing a mismatched pair raises a `ValueError` immediately.
+
+## Collection Group Queries
+
+A **collection group** query runs across **all** subcollections with the same name, regardless of which parent document they live under. Use `collection_group_find()` when you need to search data without knowing — or caring about — the parent.
+
+```python
+async def find_all_published_posts():
+    # Returns Post documents from ALL users
+    async for post in Post.collection_group_find(
+        filters=[Post.published == True],
+        limit=50,
+    ):
+        print(post.id, post._parent_path)
+        # _parent_path is set automatically, e.g. "users/uid_abc"
+```
+
+<Note>
+Collection group queries require a **composite index** in Firestore. If Firestore returns an index error the first time you run a collection group query, follow the link in the error message to create the index in the Firebase console.
+</Note>
+
+## `_parent_path` Tracking
+
+The `_parent_path` private attribute records the full Firestore document path of the parent (e.g. `"users/abc123"`) on each subcollection instance. It is set automatically in three situations:
+
+- After `save(parent=...)` — the resolved parent path is stored on the instance.
+- After `find(parent=...)` or `find_one(parent=...)` — every yielded instance has `_parent_path` set.
+- After `get(doc_id, parent=...)` — the returned instance has `_parent_path` set.
+- After `collection_group_find()` — the parent path is extracted from the document reference path.
+
+Once `_parent_path` is stored, you can call `update()` and `delete()` on the instance without supplying `parent=` again:
+
+```python
+post = await Post.get("pid_xyz", parent=user)
+# post._parent_path == "users/uid_abc"
+
+post.title = "Updated title"
+await post.update()   # uses stored _parent_path — no parent= needed
+await post.delete()   # same
+```
+
+## Full Example
+
+```python
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+from myapp.models import User, Post, Comment
+
+# Initialise — all models must be registered for cascade delete
+db = FirestoreDB(project_id="my-gcp-project", emulator_host="localhost:8080")
+init_firestore_odm(db, [User, Post, Comment])
+
+
+async def main():
+    # --- Create ---
+    user = User(name="Alice", email="alice@example.com")
+    await user.save()
+
+    post = Post(title="Hello", body="World")
+    await post.save(parent=user)          # users/{uid}/posts/{pid}
+
+    comment = Comment(text="Great post!", author="Bob")
+    await comment.save(parent=post)       # users/{uid}/posts/{pid}/comments/{cid}
+
+    # --- Query via SubCollectionAccessor ---
+    async for p in user.subcollection(Post).find():
+        print(p.title)
+
+    # --- Query via class method ---
+    async for c in Comment.find(parent=post):
+        print(c.text, c.author)
+
+    # --- Collection group: all comments across all posts/users ---
+    async for c in Comment.collection_group_find():
+        print(c.author, c._parent_path)
+
+    # --- Cascade delete user and all nested data ---
+    await user.delete(cascade=True)
+    # Removes: comments, posts, then the user document
+```
+
+<CardGroup cols={2}>
+  <Card title="Models" icon="file-code" href="/concepts/models">
+    Define Firestore document schemas and configure collection settings.
+  </Card>
+  <Card title="Database Client" icon="database" href="/concepts/database-client">
+    Configure credentials, the emulator, and register your models.
+  </Card>
+</CardGroup>

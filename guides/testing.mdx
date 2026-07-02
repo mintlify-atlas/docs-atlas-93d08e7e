@@ -1,0 +1,278 @@
+---
+title: "Testing Firestore Apps Using the Emulator and MagicMocks"
+sidebarTitle: "Testing"
+description: "Run integration tests against the local Firestore emulator or swap the client for a MagicMock to keep unit tests fast and network-free."
+---
+
+Firestore Pydantic ODM is designed to be testable at two levels: **integration tests** that run against the official Firestore Emulator (no real GCP project required) and **unit tests** that replace the entire Firestore client with a `unittest.mock.MagicMock`. Both strategies are supported out of the box through the `FirestoreDB` API — no monkey-patching or third-party test helpers needed.
+
+## Two Testing Strategies
+
+<CardGroup cols={2}>
+  <Card title="Emulator (Integration)" icon="server" href="/guides/testing">
+    Runs all queries against a real Firestore protocol. Catches subtle query bugs, index requirements, and serialization edge cases.
+  </Card>
+  <Card title="MagicMock (Unit)" icon="flask" href="/guides/testing">
+    Replaces the client with a mock object. No network, no emulator, and instant test execution — ideal for testing business logic in isolation.
+  </Card>
+</CardGroup>
+
+---
+
+## Integration Testing with the Firestore Emulator
+
+The [Google Cloud Firestore Emulator](https://firebase.google.com/docs/emulator-suite) runs a full in-process Firestore implementation locally. It accepts the same gRPC protocol as production Firestore but requires no credentials and stores data only in memory.
+
+### Installing and Starting the Emulator
+
+<Steps>
+  <Step title="Install the Google Cloud CLI">
+    Download and install the gcloud CLI from [cloud.google.com/sdk](https://cloud.google.com/sdk/docs/install), then install the Firestore emulator component:
+
+    ```bash
+    gcloud components install cloud-firestore-emulator
+    ```
+  </Step>
+  <Step title="Start the emulator">
+    Run the emulator on a local port. The default port is `8080`:
+
+    ```bash
+    gcloud emulators firestore start --host-port=localhost:8080
+    ```
+  </Step>
+  <Step title="Set the environment variable">
+    The Google client libraries detect the `FIRESTORE_EMULATOR_HOST` environment variable and route all traffic to the emulator automatically:
+
+    ```bash
+    export FIRESTORE_EMULATOR_HOST=localhost:8080
+    ```
+  </Step>
+  <Step title="Point FirestoreDB at the emulator">
+    Pass `emulator_host=` to the `FirestoreDB` constructor, or call `.use_emulator()` at runtime. Both approaches set `FIRESTORE_EMULATOR_HOST` automatically:
+
+    ```python
+    from firestore_pydantic_odm import FirestoreDB
+
+    # Option A — constructor
+    db = FirestoreDB(project_id="test-project", emulator_host="localhost:8080")
+
+    # Option B — runtime toggle
+    db = FirestoreDB(project_id="test-project")
+    db.use_emulator("localhost:8080")
+    ```
+  </Step>
+</Steps>
+
+<Note>
+When you call `FirestoreDB(emulator_host=...)` or `db.use_emulator(...)`, the ODM sets `os.environ["FIRESTORE_EMULATOR_HOST"]` automatically. You do not need to export the variable separately in your test process — but if you also start the emulator in a subprocess, you may still need it there.
+</Note>
+
+---
+
+## Unit Testing with `mock_firestore_for_tests()`
+
+For pure unit tests that should not touch any network or emulator, call `mock_firestore_for_tests()` on your `FirestoreDB` instance. This replaces the internal `AsyncClient` with a `unittest.mock.MagicMock`:
+
+```python
+from firestore_pydantic_odm import FirestoreDB, BaseFirestoreModel, init_firestore_odm
+
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+
+
+def setup_mocked_db():
+    db = FirestoreDB(project_id="test-project")
+    db.mock_firestore_for_tests()     # client is now a MagicMock
+    init_firestore_odm(db, [User])
+    return db
+```
+
+With a `MagicMock` client, every call to `db.client.*` returns a new mock. You can configure return values using the standard `unittest.mock` API to test your application logic without hitting Firestore.
+
+---
+
+## pytest-asyncio Setup
+
+All ODM methods are `async`, so your tests need an async-capable test runner. Install `pytest-asyncio` and configure it in `pytest.ini` or `pyproject.toml`:
+
+```bash
+pip install pytest-asyncio
+```
+
+```ini
+# pytest.ini
+[pytest]
+asyncio_mode = auto
+```
+
+Or in `pyproject.toml`:
+
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+```
+
+With `asyncio_mode = auto`, pytest-asyncio handles the event loop for every `async def test_*` function automatically — no `@pytest.mark.asyncio` decorator needed on individual tests.
+
+---
+
+## `conftest.py` with Emulator Fixtures
+
+Create a `conftest.py` at the root of your test directory to share the database fixture across all tests. The fixture below detects the `FIRESTORE_EMULATOR_HOST` environment variable and configures `FirestoreDB` accordingly:
+
+```python
+# tests/conftest.py
+import os
+import pytest
+import pytest_asyncio
+import httpx
+
+from firestore_pydantic_odm import FirestoreDB, init_firestore_odm
+from myapp.models import User, Post  # your application models
+
+EMULATOR_HOST = os.environ.get("FIRESTORE_EMULATOR_HOST", "localhost:8080")
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "test-project")
+
+ALL_MODELS = [User, Post]
+
+
+@pytest.fixture()
+def firestore_db():
+    """FirestoreDB pointed at the local emulator."""
+    return FirestoreDB(project_id=PROJECT_ID, emulator_host=EMULATOR_HOST)
+
+
+@pytest_asyncio.fixture()
+async def initialized_models(firestore_db):
+    """Initialize the ODM and wipe the emulator before each test."""
+    init_firestore_odm(firestore_db, ALL_MODELS)
+    yield
+    # Clean up emulator data after the test
+    url = (
+        f"http://{EMULATOR_HOST}/emulator/v1/projects/"
+        f"{PROJECT_ID}/databases/(default)/documents"
+    )
+    async with httpx.AsyncClient() as client:
+        await client.delete(url)
+```
+
+<Tip>
+The emulator exposes a REST endpoint (`DELETE /emulator/v1/projects/{project}/databases/{db}/documents`) that wipes all data in a single request. Call it in your fixture teardown to guarantee test isolation without deleting documents one by one.
+</Tip>
+
+---
+
+## Example Integration Test
+
+With the fixtures above, writing integration tests looks identical to writing application code:
+
+```python
+# tests/test_user_queries.py
+import pytest
+from myapp.models import User
+
+
+async def test_find_by_name(initialized_models):
+    # Arrange
+    await User(name="Alice", email="alice@example.com", age=30).save()
+    await User(name="Bob",   email="bob@example.com",   age=25).save()
+
+    # Act
+    results = [u async for u in User.find(filters=[User.name == "Alice"])]
+
+    # Assert
+    assert len(results) == 1
+    assert results[0].name == "Alice"
+    assert results[0].id is not None
+
+
+async def test_count_adults(initialized_models):
+    for i, age in enumerate([17, 18, 25, 30]):
+        await User(name=f"User{i}", email=f"u{i}@example.com", age=age).save()
+
+    total = await User.count(filters=[User.age >= 18])
+    assert total == 3
+
+
+async def test_get_nonexistent_returns_none(initialized_models):
+    result = await User.get("does-not-exist")
+    assert result is None
+```
+
+---
+
+## Docker Compose for CI
+
+For continuous integration pipelines, spin up the emulator as a service container. The repository ships with a `docker-compose.test.yml` that starts the emulator and runs the test suite:
+
+```yaml
+# docker-compose.test.yml (excerpt)
+services:
+  firestore-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud emulators firestore start --host-port=0.0.0.0:8080
+    ports:
+      - "8080:8080"
+
+  tests:
+    build: .
+    environment:
+      FIRESTORE_EMULATOR_HOST: firestore-emulator:8080
+      GOOGLE_CLOUD_PROJECT: test-project
+    depends_on:
+      - firestore-emulator
+    command: pytest tests/
+```
+
+Run both services together with:
+
+```bash
+docker compose -f docker-compose.test.yml up --abort-on-container-exit
+```
+
+---
+
+## Switching Back to Production
+
+If your test suite uses `use_emulator()` to toggle mid-session, call `clear_emulator()` to reconnect to the production Firestore endpoint and discard the emulator configuration:
+
+```python
+db = FirestoreDB(project_id="my-project")
+db.use_emulator("localhost:8080")   # point to emulator
+
+# ... run integration tests ...
+
+db.clear_emulator()                 # back to production Firestore
+```
+
+`clear_emulator()` unsets `FIRESTORE_EMULATOR_HOST` from the environment and recreates the underlying `AsyncClient` pointed at the real GCP backend.
+
+---
+
+## Summary
+
+<Accordion title="Emulator vs. MagicMock — when to use each">
+**Use the emulator when:**
+- You want to test actual Firestore query semantics (filters, ordering, pagination, collection group queries).
+- You are testing subcollection relationships or cascade delete logic.
+- You want to catch issues with field aliases, serialization, or Pydantic validation against real data.
+
+**Use MagicMock when:**
+- You are testing business logic that calls model methods but you do not care about the Firestore responses.
+- You want the fastest possible test execution with no external dependencies.
+- You are writing tests for service or controller layers that sit above the ODM.
+</Accordion>
+
+<CardGroup cols={2}>
+  <Card title="Database Client" icon="database" href="/concepts/database-client">
+    Learn about FirestoreDB configuration options and credential handling.
+  </Card>
+  <Card title="Querying" icon="magnifying-glass" href="/guides/querying">
+    Explore the full filter, ordering, and pagination query API.
+  </Card>
+</CardGroup>

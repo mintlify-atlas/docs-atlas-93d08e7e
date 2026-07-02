@@ -1,0 +1,337 @@
+---
+title: "How to Query Firestore Documents with Pydantic ODM"
+sidebarTitle: "Querying"
+description: "Learn how to filter, order, paginate, and aggregate Firestore documents using the expressive FirestoreField descriptor API and async generators."
+---
+
+Firestore Pydantic ODM exposes a rich, type-safe query API built on top of Google Cloud Firestore's async client. Every query method is a coroutine or async generator, so you can stream results without loading the entire collection into memory. Filters are expressed using plain Python comparison operators on your model's class-level attributes — no string literals required for field names.
+
+## The `find()` Async Generator
+
+`find()` is the primary method for querying a collection. It returns an **async generator** that yields model instances one at a time as Firestore streams them.
+
+```python
+async for user in User.find(
+    filters=[User.age >= 18],
+    order_by=(User.name, OrderByDirection.ASCENDING),
+    limit=10,
+    offset=0,
+):
+    print(user.name)
+```
+
+### Signature
+
+```python
+@classmethod
+async def find(
+    cls,
+    filters: List[Tuple[FieldType, FirestoreOperators, Any]] = None,
+    parent: Optional[BaseFirestoreModel] = None,
+    projection: Optional[Type[BaseModel]] = None,
+    order_by: Optional[Union[List[Union[FieldType, FieldOrderType]], Union[FieldType, FieldOrderType]]] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> AsyncGenerator[Union[BaseFirestoreModel, BaseModel], None]: ...
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `filters` | `list` | A list of filter tuples, each produced by a `FirestoreField` comparison expression. |
+| `parent` | `BaseFirestoreModel` | Parent document instance for subcollection queries. |
+| `projection` | `Type[BaseModel]` | A plain Pydantic model that defines the fields to fetch. See [Projections](/guides/projections). |
+| `order_by` | `FieldType` or `tuple` or `list` | Field or `(field, direction)` tuple to sort results by. |
+| `limit` | `int` | Maximum number of documents to return. |
+| `offset` | `int` | Number of documents to skip before returning results. |
+
+---
+
+## Filter Syntax
+
+Filters are created by applying comparison operators directly to your model's **class-level** field descriptors. Each expression returns a `(field_name, operator, value)` tuple that `find()` passes to Firestore.
+
+### Comparison Operators
+
+```python
+# Equality
+User.name == "Alice"           # ("name", "==", "Alice")
+
+# Inequality
+User.email != "banned@example.com"  # ("email", "!=", "banned@example.com")
+
+# Numeric comparisons
+User.age >= 18                 # ("age", ">=", 18)
+User.age > 18                  # ("age", ">", 18)
+User.age <= 65                 # ("age", "<=", 65)
+User.age < 65                  # ("age", "<", 65)
+```
+
+### All Available Operators (`FirestoreOperators`)
+
+| Enum Member | Firestore Operator | Meaning |
+|-------------|-------------------|---------|
+| `EQ` | `==` | Equal |
+| `NE` | `!=` | Not equal |
+| `LT` | `<` | Less than |
+| `LTE` | `<=` | Less than or equal |
+| `GT` | `>` | Greater than |
+| `GTE` | `>=` | Greater than or equal |
+| `IN` | `in` | Value is in a list |
+| `NOT_IN` | `not-in` | Value is not in a list |
+| `ARRAY_CONTAINS` | `array_contains` | Array field contains value |
+| `ARRAY_CONTAINS_ANY` | `array_contains_any` | Array field contains any of values |
+
+### `in_()` — Match Any Value in a List
+
+Use the `.in_()` helper method on a `FirestoreField` to generate an `IN` filter:
+
+```python
+async for user in User.find(
+    filters=[User.status.in_(["active", "pending"])]
+):
+    print(user.name, user.status)
+```
+
+Similarly, `.not_in_()` generates a `NOT_IN` filter:
+
+```python
+async for user in User.find(
+    filters=[User.status.not_in_(["banned", "deleted"])]
+):
+    print(user.name)
+```
+
+### `array_contains()` — Filter by Array Membership
+
+Use `.array_contains()` to find documents where an array field includes a specific value:
+
+```python
+async for product in Product.find(
+    filters=[Product.tags.array_contains("python")]
+):
+    print(product.title)
+```
+
+Use `.array_contains_any()` to match any of multiple values:
+
+```python
+async for product in Product.find(
+    filters=[Product.tags.array_contains_any(["python", "go"])]
+):
+    print(product.title)
+```
+
+---
+
+## Multiple Filters
+
+Pass a list of filter expressions to `filters=` to apply all of them. Firestore evaluates them as a logical **AND**:
+
+```python
+async for user in User.find(
+    filters=[
+        User.age >= 25,
+        User.age <= 35,
+        User.name != "Charlie",
+    ]
+):
+    print(user.name, user.age)
+```
+
+---
+
+## `find_one()` — First Match or None
+
+`find_one()` runs the same query as `find()` with `limit=1` and returns the first matching instance, or `None` if nothing matches. It accepts the same `filters`, `parent`, `projection`, and `order_by` parameters.
+
+```python
+user = await User.find_one(filters=[User.email == "alice@example.com"])
+if user:
+    print(f"Found: {user.name}")
+else:
+    print("No user found.")
+```
+
+---
+
+## `get()` — Fetch a Document by ID
+
+When you already know a document's ID, use `get()` instead of `find()`. It returns the model instance or `None` if the document does not exist.
+
+```python
+user = await User.get("abc123")
+if user:
+    print(user.name)
+```
+
+For subcollections, pass the parent instance:
+
+```python
+post = await Post.get("post_id_456", parent=user)
+```
+
+---
+
+## `exists()` — Check Document Existence
+
+`exists()` returns `True` or `False` without fetching the document's data. This is more efficient than `get()` when you only need to verify the document exists.
+
+```python
+if await User.exists("abc123"):
+    print("User exists")
+else:
+    print("User not found")
+```
+
+---
+
+## `count()` — Count Matching Documents
+
+`count()` returns an integer representing the number of documents that match the given filters. It uses Firestore's native `count()` aggregation when available, falling back to a lightweight `select([])` fetch otherwise.
+
+```python
+total_adults = await User.count(filters=[User.age >= 18])
+print(f"Adults: {total_adults}")
+
+# Count with no filters returns total documents in the collection
+all_users = await User.count(filters=[])
+```
+
+---
+
+## Ordering Results
+
+Control the sort order of `find()` results with the `order_by` parameter.
+
+### Single Field
+
+Pass a `(field, direction)` tuple using `OrderByDirection.ASCENDING` or `OrderByDirection.DESCENDING`:
+
+```python
+from firestore_pydantic_odm import OrderByDirection
+
+async for user in User.find(
+    order_by=(User.name, OrderByDirection.ASCENDING)
+):
+    print(user.name)
+```
+
+You can also pass just a field descriptor to sort ascending by default:
+
+```python
+async for user in User.find(order_by=User.name):
+    print(user.name)
+```
+
+### Multiple Fields
+
+Pass a list of `(field, direction)` tuples to sort by multiple fields. Firestore requires a composite index when combining multiple `order_by` fields with inequality filters:
+
+```python
+async for user in User.find(
+    order_by=[
+        (User.age, OrderByDirection.ASCENDING),
+        (User.name, OrderByDirection.ASCENDING),
+    ]
+):
+    print(user.age, user.name)
+```
+
+---
+
+## Pagination with `limit` and `offset`
+
+Use `limit` to cap the number of results and `offset` to skip documents — together they implement cursor-free pagination:
+
+```python
+PAGE_SIZE = 10
+page_number = 2  # 0-indexed
+
+async for user in User.find(
+    order_by=(User.name, OrderByDirection.ASCENDING),
+    limit=PAGE_SIZE,
+    offset=PAGE_SIZE * page_number,
+):
+    print(user.name)
+```
+
+<Warning>
+`offset` causes Firestore to read and discard skipped documents, which counts toward your read quota. For large collections, consider cursor-based pagination using Firestore's `start_after()` on the underlying client for better cost efficiency.
+</Warning>
+
+---
+
+## `collection_group_find()` — Cross-Parent Queries
+
+`collection_group_find()` queries across **all** subcollections with the same name, regardless of which parent document they belong to. This is equivalent to Firestore's `collectionGroup()` API.
+
+```python
+# Find all published posts across every user's subcollection
+async for post in Post.collection_group_find(
+    filters=[Post.published == True],
+    order_by=(Post.title, OrderByDirection.ASCENDING),
+):
+    print(post.title, post._parent_path)
+```
+
+The `_parent_path` private attribute on each yielded instance is automatically set to the path of the parent document (e.g. `"users/uid_123"`).
+
+<Note>
+Collection group queries require a Firestore **composite index** on the `__name__` field. Create it in the Firebase console or deploy it via `firestore.indexes.json` before running collection group queries in production.
+</Note>
+
+---
+
+## Complete Query Example
+
+```python
+import asyncio
+from firestore_pydantic_odm import BaseFirestoreModel, FirestoreDB, OrderByDirection, init_firestore_odm
+
+
+class User(BaseFirestoreModel):
+    class Settings:
+        name = "users"
+
+    name: str
+    email: str
+    age: int = 0
+
+
+async def main():
+    db = FirestoreDB(project_id="my-project")
+    init_firestore_odm(db, [User])
+
+    # Range filter + ordering
+    async for user in User.find(
+        filters=[User.age >= 18, User.age <= 65],
+        order_by=(User.age, OrderByDirection.DESCENDING),
+        limit=5,
+    ):
+        print(f"{user.name} — age {user.age}")
+
+    # Single document
+    alice = await User.find_one(filters=[User.name == "Alice"])
+    print(alice)
+
+    # Existence check
+    if await User.exists("known-id"):
+        doc = await User.get("known-id")
+        print(doc.email)
+
+    # Count
+    adult_count = await User.count(filters=[User.age >= 18])
+    print(f"Adults in DB: {adult_count}")
+
+
+asyncio.run(main())
+```
+
+<CardGroup cols={2}>
+  <Card title="Projections" icon="table-columns" href="/guides/projections">
+    Fetch only the fields you need to reduce bandwidth and cost.
+  </Card>
+  <Card title="Batch Operations" icon="layer-group" href="/guides/batch-operations">
+    Perform atomic multi-document writes in a single round-trip.
+  </Card>
+</CardGroup>
